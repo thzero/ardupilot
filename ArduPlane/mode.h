@@ -70,6 +70,9 @@ public:
 #if MODE_AUTOLAND_ENABLED
         AUTOLAND      = 26,
 #endif
+#if HAL_QUADPLANE_ENABLED
+        QROCKET       = 27,
+#endif
 
     // Mode number 30 reserved for "offboard" for external/lua control.
     };
@@ -756,6 +759,27 @@ private:
     void set_tailsitter_roll_pitch(const float roll_input, const float pitch_input);
     void set_limited_roll_pitch(const float roll_input, const float pitch_input);
 
+};
+
+// QROCKET: dedicated vertical-hold mode for a single-motor vectored tailsitter
+// rocket. Subclasses QSTABILIZE to reuse the tailsitter attitude/servo stack,
+// and adds: forced air-mode (full authority at zero throttle), a forced-vertical
+// target, and an accel launch gate (integrators held until liftoff). All
+// rocket-only policy lives in the AP_Rocket library; this mode is the thin shim.
+class ModeQRocket : public ModeQStabilize
+{
+public:
+
+    Number mode_number() const override { return Number::QROCKET; }
+    const char *name() const override { return "QRocket"; }
+    const char *name4() const override { return "QRKT"; }
+
+    // reuses ModeQStabilize is_vtol_mode()/is_vtol_man_throttle()/is_vtol_man_mode()
+    // (do NOT override — keeps Tailsitter::active() true, blocks FW transition)
+
+    bool _enter() override;
+    void update() override;
+    void run() override;
 };
 
 class ModeQHover : public Mode

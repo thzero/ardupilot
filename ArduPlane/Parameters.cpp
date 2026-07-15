@@ -1026,7 +1026,13 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     // @Path: ../libraries/AP_Soaring/AP_Soaring.cpp
     AP_SUBGROUPINFO(soaring_controller, "SOAR_", 8, ParametersG2, SoaringController),
 #endif
-  
+
+#if AP_ROCKET_ENABLED
+    // @Group: RKT_
+    // @Path: ../libraries/AP_Rocket/AP_Rocket.cpp
+    AP_SUBGROUPINFO(rocket, "RKT_", 42, ParametersG2, AP_Rocket),
+#endif
+
     // @Param: RUDD_DT_GAIN
     // @DisplayName: rudder differential thrust gain
     // @Description: gain control from rudder to differential thrust

@@ -67,6 +67,7 @@
 #include <AP_Mission/AP_Mission.h>     // Mission command library
 
 #include <AP_Soaring/AP_Soaring.h>
+#include <AP_Rocket/AP_Rocket.h>
 #include <AP_BattMonitor/AP_BattMonitor.h> // Battery monitor library
 
 #include <AP_Arming/AP_Arming.h>
@@ -165,6 +166,7 @@ public:
     friend class ModeInitializing;
     friend class ModeManual;
     friend class ModeQStabilize;
+    friend class ModeQRocket;
     friend class ModeQHover;
     friend class ModeQLoiter;
     friend class ModeQLand;
@@ -314,6 +316,7 @@ private:
     ModeManual mode_manual;
 #if HAL_QUADPLANE_ENABLED
     ModeQStabilize mode_qstabilize;
+    ModeQRocket mode_qrocket;
     ModeQHover mode_qhover;
     ModeQLoiter mode_qloiter;
     ModeQLand mode_qland;
