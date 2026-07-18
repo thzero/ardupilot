@@ -1,0 +1,145 @@
+# ArduRocket SITL defaults: a fin-steered solid-motor rocket.
+#
+# The airframe has no RC receiver and no ground station in flight. It holds
+# vertical on four fins and nothing can command it to do anything else.
+
+# --- Frame ------------------------------------------------------------------
+# Which actuator steers the airframe. 0 = Fins (the only implemented option).
+# 1 = ThrustVectoring is scoped but NOT built; selecting it makes the vehicle
+# refuse to boot rather than fly with the wrong mixer. Reboot required to change.
+FRAME_CLASS      0
+
+# --- Fins -------------------------------------------------------------------
+# Four fins on the first four outputs, numbered clockwise viewed from the nose.
+SERVO1_FUNCTION  190
+SERVO2_FUNCTION  191
+SERVO3_FUNCTION  192
+SERVO4_FUNCTION  193
+
+# --- Flight stage detection -------------------------------------------------
+RKT_ENABLE       1
+# Launch: the pad reads 1g, the motor pulls several. 1.5g with 50ms of debounce
+# clears pad vibration without waiting long enough to matter.
+RKT_LAUNCH_G     1.5
+RKT_LAUNCH_MS    50
+# Body X points at the nose once AHRS_ORIENTATION is applied.
+RKT_LAUNCH_AX    0
+# Burnout: coasting reads near zero (drag only), boosting reads several g.
+# Recorded only -- it does not stop the fins. Apogee does.
+RKT_BURN_G       0.2
+RKT_BURN_MS      100
+# Apogee: once launched, a sustained negative climb rate means we are over the top
+# and the fins must stop. This -- not burnout -- ends steering.
+RKT_APOG_MS      500
+
+# --- Fin gain scheduling ----------------------------------------------------
+# MOT_Q_REF is the dynamic pressure at which the attitude gains are nominal; the
+# mixer scales fin deflection by MOT_Q_REF/q, bounded by MOT_GAIN_MAX.
+#
+# 142 Pa is derived from the rail-exit target, not picked arbitrarily:
+#
+#   50 fps target  =  15.24 m/s
+#   q = 0.5 * rho * v^2 = 0.5 * 1.225 * 15.24^2 = 142 Pa
+#
+# Setting Q_REF here makes the scheduling nominal (gain = 1.0) at rail exit -- the
+# lowest-authority moment of the flight, and therefore the condition the gains
+# should be tuned for. Above it the gain scales down, which is correct: at high q
+# the fins are very effective and need only small deflections.
+#
+# NOTE the earlier default of 600 Pa (~31 m/s) was a guess, and was actively wrong
+# here: it demanded a 4.22x boost at rail exit against a 4x cap, so the scheduling
+# sat clamped at exactly the moment it mattered most.
+#
+# If the gains end up tuned at some other flight condition, set Q_REF to THAT
+# condition's q.
+MOT_Q_REF        142
+
+# Upper bound on the low-q gain boost. With Q_REF at the rail-exit value this now
+# only engages BELOW the 50 fps target -- i.e. when the rocket is already slower
+# off the rail than it should be.
+MOT_GAIN_MAX     4
+
+# --- Attitude control -------------------------------------------------------
+# Placeholder gains. These have NOT been flown and are a starting point for SITL
+# tuning only. View roll and view pitch are the two tilt axes; view yaw is spin
+# about the long axis, which the vehicle does not try hard to control.
+ATC_RAT_RLL_P    0.08
+ATC_RAT_RLL_I    0.05
+ATC_RAT_RLL_D    0.003
+ATC_RAT_PIT_P    0.08
+ATC_RAT_PIT_I    0.05
+ATC_RAT_PIT_D    0.003
+ATC_RAT_YAW_P    0.10
+ATC_RAT_YAW_I    0.01
+ATC_RAT_YAW_D    0.0
+ATC_ANG_RLL_P    6.0
+ATC_ANG_PIT_P    6.0
+ATC_ANG_YAW_P    2.0
+
+# --- Loop rate --------------------------------------------------------------
+# A rocket needs the fast 400Hz control loop, and it must match the SITL IMU rate.
+SCHED_LOOP_RATE  400
+
+# --- Arming -----------------------------------------------------------------
+# ARMING_SKIPCHK is a bitmask of pre-arm checks to SKIP.
+# NOTE: the parameter is ARMING_SKIPCHK, NOT the old ARMING_CHECK. Setting the
+# wrong name fails silently -- the value is simply ignored and every check runs.
+#
+# BRING-UP SETTING (current): -1 skips every check, so the vehicle always arms.
+# This is required in SITL, where the simulated board has no accelerometer
+# calibration and so could never satisfy the INS check. Do NOT fly this value.
+ARMING_SKIPCHK   -1
+
+# REAL FLIGHT: skip only the checks for hardware this airframe does not have, and
+# keep the ones that would actually save it. Swap the line above for this one:
+#
+#   ARMING_SKIPCHK 21064
+#
+# 21064 = GPS(8) + RC(64) + AIRSPEED(512) + GPS_CONFIG(4096) + MISSION(16384)
+#
+#   skipped, because the hardware is absent:
+#     GPS(8), GPS_CONFIG(4096)  - no GPS, so the EKF never gets a home
+#     RC(64)                    - no receiver
+#     AIRSPEED(512)             - no pitot
+#     MISSION(16384)            - no mission
+#
+#   KEPT, because they are the safety net that matters:
+#     BARO(2)   - apogee detection rides on the barometer. A dead baro means the
+#                 fins never stop and thrash all the way down.
+#     INS(16)   - attitude hold depends entirely on the IMU.
+#     plus COMPASS(4), PARAMETERS(32), VOLTAGE(128), BATTERY(256),
+#          LOGGING(1024), SYSTEM(8192)
+#
+# Consequence: keeping INS(16) means the "3D Accel calibration needed" check stays
+# active, so the flight controller must have a real 3D accelerometer calibration
+# before it will arm. That is the check doing its job, not an obstacle.
+#
+# Regardless of this parameter, AP_Arming_Rocket separately enforces that the
+# airframe is near-vertical and still (i.e. actually on the rail) before arming.
+
+# --- Levelling to vertical --------------------------------------------------
+# The target is ALWAYS true vertical. The rail attitude captured at arming is a
+# calibration: the attitude target blends from it to vertical as dynamic pressure
+# rises, so the correction happens as the fins gain authority rather than as a step
+# at rail exit where they have almost none.
+#
+# 600 Pa is about 31 m/s -- shortly after the 50 fps (15.24 m/s, 142 Pa) rail exit,
+# so the rocket is commanding true vertical early in the boost.
+# Lower = level out sooner and harder. 0 = command vertical immediately, no blend.
+RKT_LEVEL_Q      600
+
+# --- Airframe ---------------------------------------------------------------
+# The flight controller is mounted nose-up.
+AHRS_ORIENTATION 24
+
+# No receiver. Without this the vehicle waits for RC it will never see.
+RC_PROTOCOLS     0
+
+# The rocket flies without GPS: attitude hold needs no position, and the speed
+# estimate the fin gains ride on comes from baro + IMU.
+EK3_SRC1_POSXY   0
+EK3_SRC1_VELXY   0
+EK3_SRC1_POSZ    1
+
+# Outputs live at boot: there is no safety switch on the pad.
+BRD_SAFETY_DEFLT 0

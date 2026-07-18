@@ -1,105 +1,123 @@
 # AP_Rocket
 
-Vehicle-agnostic support library for **autonomous vertical-hold rocket flight** on ArduPilot.
+Vehicle-agnostic flight-stage detection for **autonomous vertical-hold rocket flight**.
 
-It holds the rocket-specific *brains* — launch detection and integrator-gating policy — behind a small,
-Plane-free API, plus the `RKT_*` parameters. It is driven by the thin `QROCKET` flight mode in
-`ArduPlane/` (`ArduPlane/mode_qrocket.cpp`). Same structural pattern as `AP_Soaring`, `AP_Landing`,
+It holds the rocket-specific *brains* — launch, burnout and apogee detection, plus the integrator-gating
+policy — behind a small API, along with the `RKT_*` parameters. It is driven by the **ArduRocket**
+vehicle (`ArduRocket/rocket_control.cpp`). Same structural pattern as `AP_Soaring`, `AP_Landing`,
 `AP_ICEngine`: a self-contained library run by a thin vehicle-side hook.
+
+> **History:** an earlier version of this library drove a `QROCKET` flight mode inside ArduPlane, and
+> this README argued a standalone vehicle was infeasible. That claim did not survive inspection — see
+> "Why a separate vehicle after all" below. QROCKET has been removed; ArduRocket replaces it.
 
 ## Goal
 
-Keep a hobby rocket flying **vertically** (attitude hold to 0° tilt) with **no RC transmitter and no
-ground station**, using either a TVC gimbal or steering fins. Holding vertical is *stabilization*, not
-guidance-to-a-target.
+Keep a hobby rocket flying **vertically** (attitude hold to 0° tilt) on **four steering fins**, under a
+**solid motor** (no thrust control), with **no RC transmitter and no ground station**. Holding vertical is
+*stabilization*, not guidance-to-a-target.
 
-To the flight stack a TVC/finned rocket held vertical is a **single-motor vectored tailsitter that never
-transitions to forward flight** — so `QROCKET` subclasses `ModeQStabilize` and reuses ArduPilot's hardened
-tailsitter attitude/EKF/servo stack unchanged.
+Motor burn times vary widely: typically **0.8–8 s**, with outliers to **16 s**. Nothing here assumes a
+fixed or short burn.
 
-## What QROCKET does (three behaviors)
-
-1. **Full-authority stabilization at zero throttle.** Forces air-mode ON so `hold_stabilize()` never
-   relaxes the attitude controllers while the rocket sits on the pad at zero throttle.
-2. **Vertical target.** Forces roll/pitch target to 0 every loop; ignores stray/absent RC input.
-3. **Accel launch gate.** Holds the rate-controller integrators (P/D stay live) until measured body-up
-   acceleration exceeds `RKT_LAUNCH_G`, preventing integrator wind-up against the launch rail.
-
-## Architecture
+## The flight stages
 
 ```
-libraries/AP_Rocket/          <- this library (rocket brains, RKT_ params) — vehicle-agnostic
-    AP_Rocket_config.h        <- AP_ROCKET_ENABLED build gate
-    AP_Rocket.h / .cpp        <- launch detector + gating policy + params
-ArduPlane/
-    mode.h                    <- QROCKET enum + ModeQRocket : public ModeQStabilize
-    mode_qrocket.cpp          <- THIN shim: the only code that touches Plane/QuadPlane internals
-    control_modes.cpp         <- mode_from_number() case
-    Plane.h / quadplane.h     <- ModeQRocket friend + mode_qrocket member
-    Parameters.cpp / .h       <- ParametersG2 RKT_ subgroup (index 42)
+PRE_LAUNCH -> on the rail. Rate integrators held: the fins have no airflow and
+              cannot move the vehicle, so any I-term would wind up against the
+              rail and dump into the fins the instant it flies. P/D stay live.
+BOOST      -> launch detected (body-up accel over RKT_LAUNCH_G). Full authority.
+COAST      -> burnout detected. RECORDED ONLY -- this drives no control change.
+              Aerodynamic fins still have airflow while the rocket is ascending,
+              so the caller keeps steering through COAST.
+DESCENT    -> apogee (climb rate negative). Steering MUST cease: there is no
+              upward airflow left to steer with, and nothing should flail on the
+              way down.
 ```
 
-### Portability constraint (deliberate)
+**The important subtlety: burnout does not stop the fins — apogee does.** Fin tabs work off airflow, so
+they keep authority after the motor quits, right up to apogee. A **control vane** (CV, a jet vane in the
+exhaust) is the exception: it loses authority at burnout, because it works off the exhaust rather than
+freestream. This library is fins-first, so burnout is merely reported; a CV airframe would additionally
+stop at `burnt_out()`.
 
-`AP_Rocket`'s public API is **vehicle-agnostic**: it takes plain inputs (a body-frame acceleration
-`Vector3f`) and returns plain decisions (`launched()`, `hold_integrators()`). It must **never** reference
-`Plane`/`QuadPlane` types. All ArduPlane coupling (`plane.ins`, `plane.nav_roll_cd`,
-`quadplane.air_mode`, `attitude_control->…`) lives only in `ArduPlane/mode_qrocket.cpp`. This keeps the
-library liftable into a standalone vehicle later, should that ever be wanted.
+Apogee is checked in parallel with burnout during BOOST, so a missed burnout can never leave the fins
+running on the way down.
 
-### Why not a separate `ArduRocket/` vehicle, or Lua?
+## API
 
-- **Separate vehicle folder:** ArduPilot vehicle directories are not linkable libraries and the
-  tailsitter/QuadPlane stack is welded to the global `plane` singleton via `friend` access — a separate
-  vehicle would have to fork all of ArduPlane. The sanctioned OOP reuse is exactly
-  `ModeQRocket : public ModeQStabilize`, which must live in `ArduPlane/`.
-- **Lua (`AP_Scripting`):** runs on a low-priority thread with an instruction budget, off the fast loop —
-  tens of Hz with jitter. The integrator gating must run in the ~400 Hz fast loop, which Lua cannot do.
+```cpp
+void  update(const Vector3f &accel_body, float climb_rate_ms);  // feed every loop
+Stage stage() const;              // PRE_LAUNCH / BOOST / COAST / DESCENT
+bool  steering_active() const;    // BOOST or COAST -- keep flying the fins
+bool  hold_integrators() const;   // PRE_LAUNCH -- gate the I terms
+bool  burnt_out() const;          // informational; drives nothing for fins
+bool  descending() const;         // apogee passed; stop
+void  reset();                    // call on arm
+```
+
+Inputs are plain (a body-frame acceleration and a climb rate); outputs are plain decisions. The library
+never references a vehicle type, so it stays portable.
 
 ## Parameters
 
-| Param | Type | Default | Purpose |
-|---|---|---|---|
-| `RKT_ENABLE` | AP_Int8 | 0 | Enable the rocket vertical-hold behavior. |
-| `RKT_LAUNCH_G` | AP_Float | 1.5 | Launch-detect threshold in g (× `GRAVITY_MSS`). Bench-tune. |
-| `RKT_LAUNCH_AX` | AP_Int8 | 0 | Body up-axis: 0=X, 1=Y, 2=Z. Defends against orientation mismatch. |
+| Param | Default | Purpose |
+|---|---|---|
+| `RKT_ENABLE` | 0 | Enable stage detection. When disabled the machine parks in BOOST: fins always live, no gating, no shutdown — the bench-test configuration. |
+| `RKT_LAUNCH_G` | 1.5 | Launch threshold in g. Must sit above the stationary 1 g reading and below expected launch accel. |
+| `RKT_LAUNCH_AX` | 0 | Body up-axis: 0=X, 1=Y, 2=Z. |
+| `RKT_LAUNCH_MS` | 50 | Launch must hold this long. Guards against a single noisy sample on a vibrating pad. |
+| `RKT_BURN_G` | 0.2 | Burnout threshold in g (coasting reads near zero — drag only). |
+| `RKT_BURN_MS` | 100 | Burnout debounce, so a mid-burn thrust dip is not read as burnout. |
+| `RKT_APOG_MS` | 500 | Apogee debounce. This is what stops the fins, so it must be robust to velocity-estimate noise near the top. |
 
-## Companion parameters (set outside this library)
+## No GPS
 
-For a standalone, no-RC vertical-hold vehicle (verified names for this tree):
+The vehicle flies on **barometer + IMU only**. Climb rate (for apogee, and for the fin gain scheduling)
+comes from `AP_AHRS::get_velocity_D(velD, true)` — the high-vibration path, which uses the baro/IMU
+vertical rate rather than a GPS-backed velocity. Because there is no GPS the EKF never gets a home from
+one, so `AP_Arming_Rocket::arm()` calls `ahrs.resetHeightDatum()`, referencing every altitude and climb
+rate to the launch rail.
 
-```
-Q_ENABLE         = 1
-Q_FRAME_CLASS    = 10     # tailsitter
-Q_TAILSIT_ENABLE = 1
-AHRS_ORIENTATION = 24     # ROTATION_PITCH_90 (nose-up) — bench-verify vs 25 (PITCH_270)
-INITIAL_MODE     = 27     # QROCKET at boot, no receiver
-RC_PROTOCOLS     = 0      # no RC expected; unblocks arming
-THR_FAILSAFE     = 0
-FS_GCS_ENABL     = 0
-ARMING_SKIPCHK   = -1     # skip all pre-arm checks (note: NOT the old ARMING_CHECK)
-ARMING_REQUIRE   = 0
-BRD_SAFETY_DEFLT = 0      # outputs live at boot
-ARSPD_USE        = 0
-RKT_ENABLE       = 1
-RKT_LAUNCH_G     = 1.5
-```
+## Why a separate vehicle after all
 
-### Servo mapping (choose on the bench via `SERVOn_FUNCTION`)
+The earlier QROCKET-in-ArduPlane approach was justified by the claim that the tailsitter/QuadPlane stack
+is welded to the global `plane` singleton. Inspection showed otherwise:
 
-- **4 independent fins** (pitch+yaw+roll): S1..S4 = `k_elevon_left`(77), `k_elevon_right`(78),
-  `k_vtail_left`(79), `k_vtail_right`(80).
-- **TVC gimbal** (pitch+yaw, no roll): S1/S2 = `k_tiltMotorLeft`(75), `k_tiltMotorRight`(76); requires
-  `Q_TAILSIT_VHGAIN > 0`.
+- Of `quadplane.cpp`'s 455 `plane.` references, ~68% are transition/fixed-wing machinery (mode-pointer
+  identity, mission, TECS, L1, airspeed) that a rocket deletes rather than ports.
+- 33 of 103 QuadPlane methods — including `hold_hover()`, the actual hover primitive — have **zero**
+  `plane.` references. `quadplane.h`, `tailsitter.h` and `transition.h` have zero.
+- ArduSub already reuses this same attitude stack in a different medium.
 
-## Bench-confirm before flight
+ArduPlane's real contribution to a rocket is **one line**: `ahrs.create_view(ROTATION_PITCH_90)`, which
+presents a nose-up airframe to the controller as though level, so "hold vertical" becomes "hold level"
+and `AC_AttitudeControl_Multi` applies unmodified. Everything else worth having is a library already
+shared by Copter and Sub. Building on ArduPlane would have dragged in TECS, L1, mission, airspeed and
+transition state machines — precisely the misfire surface this project exists to remove.
 
-- Body up-axis / sign under `AHRS_ORIENTATION`: log `INS`/`ACC` while vertical & stationary; the up-axis
-  should read ≈ +9.8 m/s². Adjust `RKT_LAUNCH_AX` if it is not X.
-- `RKT_LAUNCH_G`: pick a value safely above the stationary 1 g reading but below expected launch accel.
-- Correct-direction check: tilt the nose; fins/gimbal must move to push it back toward vertical.
+## Arming (vehicle side, not this library)
+
+Arming is a two-phase handshake: the first ARM runs a fin-wiggle sequence and deliberately
+does **not** arm; a second ARM confirms it and captures the rail attitude. Details in
+`ARDUROCKET_PLAN.md` §3b.
+
+**Be clear about what that wiggle is.** It does **not** verify fin direction — software
+cannot. A clamped airframe with no airflow produces no motion to observe, and comparing
+the mixer's output against measured attitude is circular (the command is derived from
+that attitude, so the signs agree even with a servo horn on backwards). A reversed servo,
+a backwards linkage, or fins mounted in swapped positions **will arm and fly**. The wiggle
+exists to make the human check unskippable, not to replace it.
+
+The same sequence can be run on demand from a ground station with
+`MAV_CMD_DO_MOTOR_TEST` (Mission Planner and QGC have UI for it), for bench testing
+without attempting to arm. It is refused while armed, and — deliberately — a bench run
+does **not** satisfy the arming gate, so it cannot be used to skip the check on the rail.
 
 ## Status
 
-Skeleton / pre-flight. Single-sample launch detection (no debounce yet). Not flight-validated.
-See the project working document for full design rationale and verification plan.
+Flies the full profile in SITL: PREP → ARMED → BOOST → COAST → DESCENT, with fins verified live during
+boost and coast and stopped at apogee. **Not flight-validated, and the attitude gains are placeholders
+that have never been tuned.** See `ARDUROCKET_PLAN.md` in the repo root for the bench checks that must
+pass before flying — in particular the manual fin-direction check, since the view-frame axis mapping
+(view roll/pitch are tilt, view yaw is spin) is easy to get backwards.

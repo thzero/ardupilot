@@ -1245,6 +1245,7 @@ vehicle_map = {
     "Plane": "ArduPlane",
     "Sub": "ArduSub",
     "Blimp" : "Blimp",
+    "Rocket": "ArduRocket",
     "Rover": "Rover",
 }
 # add lower-case equivalents too

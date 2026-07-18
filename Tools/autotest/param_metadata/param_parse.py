@@ -158,6 +158,7 @@ truename_map = {
     "AntennaTracker": "Tracker",
     "AP_Periph": "AP_Periph",
     "Blimp": "Blimp",
+    "ArduRocket": "Rocket",
 }
 valid_truenames = frozenset(truename_map.values())
 truename = truename_map.get(args.vehicle, args.vehicle)

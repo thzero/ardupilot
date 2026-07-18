@@ -40,6 +40,7 @@
 #include <SITL/SIM_Webots_Python.h>
 #include <SITL/SIM_JSON.h>
 #include <SITL/SIM_Blimp.h>
+#include <SITL/SIM_Rocket.h>
 #include <SITL/SIM_NoVehicle.h>
 #include <SITL/SIM_StratoBlimp.h>
 
@@ -208,6 +209,7 @@ static const struct {
     { "JSON",               JSON::create },
 #endif  // AP_SIM_JSON_ENABLED
     { "blimp",              Blimp::create },
+    { "rocket",             Rocket::create },
     { "novehicle",          NoVehicle::create },
 #if AP_SIM_STRATOBLIMP_ENABLED
     { "stratoblimp",        StratoBlimp::create },
@@ -677,6 +679,8 @@ void SITL_State::_parse_command_line(int argc, char * const argv[])
         _vehicle = ArduSub;
     } else if (strcmp(vehicle_str, "Blimp") == 0) {
         _vehicle = Blimp;
+    } else if (strcmp(vehicle_str, "ArduRocket") == 0) {
+        _vehicle = ArduRocket;
     } else {
         _vehicle = ArduPlane;
     }

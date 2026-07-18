@@ -219,6 +219,10 @@ public:
         k_actuator4             = 187,
         k_actuator5             = 188,
         k_actuator6             = 189,
+        k_rocketFin1            = 190,   ///< ArduRocket steering fins, numbered clockwise viewed from the nose
+        k_rocketFin2            = 191,
+        k_rocketFin3            = 192,
+        k_rocketFin4            = 193,
         k_nr_aux_servo_functions         ///< This must be the last enum value (only add new values _before_ this one)
     } Function;
 

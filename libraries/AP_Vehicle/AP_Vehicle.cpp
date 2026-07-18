@@ -459,6 +459,7 @@ void AP_Vehicle::setup()
 #endif  // AP_AIRSPEED_ENABLED
 
 
+
 #if AP_SRV_CHANNELS_ENABLED
     AP::srv().init();
 #endif
@@ -522,6 +523,7 @@ void AP_Vehicle::setup()
     nmea.init();
 #endif
 
+
 #if AP_FENCE_ENABLED
     fence.init();
     fence_init();
@@ -544,6 +546,7 @@ void AP_Vehicle::setup()
 #if AP_RPM_ENABLED
     rpm_sensor.init();
 #endif
+
 
 #if AP_ARMING_ENABLED
     AP::arming().init();

@@ -505,10 +505,6 @@ public:
     SoaringController soaring_controller;
 #endif
 
-#if AP_ROCKET_ENABLED
-    // rocket vertical-hold parameters (RKT_)
-    AP_Rocket rocket;
-#endif
 
     // dual motor tailsitter rudder to differential thrust scaling: 0-100%
     AP_Int8 rudd_dt_gain;

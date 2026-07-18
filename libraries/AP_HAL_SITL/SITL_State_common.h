@@ -77,7 +77,8 @@ public:
         Rover,
         ArduPlane,
         ArduSub,
-        Blimp
+        Blimp,
+        ArduRocket
     };
 
     // create a simulated serial device; type of device is given by

@@ -121,6 +121,10 @@
 #define AP_PARAM_FRAME_TRICOPTER    (1<<4)
 #define AP_PARAM_FRAME_HELI         (1<<5)
 #define AP_PARAM_FRAME_BLIMP        (1<<6)
+// flags is uint16_t and frame bits are shifted by AP_PARAM_FRAME_TYPE_SHIFT (8),
+// so bit 7 is the last one that fits. Adding a frame type beyond this requires
+// widening flags.
+#define AP_PARAM_FRAME_ROCKET       (1<<7)
 
 // use __builtin_offsetof which is more or less defined by Clang and GCC to work
 // on non-standard-layout C++ classes, and works in constexpr. as that isn't

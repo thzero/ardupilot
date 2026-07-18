@@ -380,6 +380,31 @@
             }
         }
     },
+    "ArduRocket": {
+        "default_frame": "rocket",
+        "frames": {
+            "rocket": {
+                "waf_target": "bin/rocket",
+                "default_params_filename": "default_params/rocket.parm"
+            },
+            "rocket-stable": {
+                "waf_target": "bin/rocket",
+                "default_params_filename": "default_params/rocket.parm"
+            },
+            "rocket-tilt5": {
+                "waf_target": "bin/rocket",
+                "default_params_filename": "default_params/rocket.parm"
+            },
+            "rocket-tilt10": {
+                "waf_target": "bin/rocket",
+                "default_params_filename": "default_params/rocket.parm"
+            },
+            "rocket-tilt20": {
+                "waf_target": "bin/rocket",
+                "default_params_filename": "default_params/rocket.parm"
+            }
+        }
+    },
     "ArduPlane": {
         "default_frame": "plane",
         "frames": {
