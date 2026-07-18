@@ -135,8 +135,25 @@ AHRS_ORIENTATION 24
 # No receiver. Without this the vehicle waits for RC it will never see.
 RC_PROTOCOLS     0
 
-# The rocket flies without GPS: attitude hold needs no position, and the speed
-# estimate the fin gains ride on comes from baro + IMU.
+# --- GPS: TRACKING ONLY, NOT CONTROL ----------------------------------------
+# GPS is enabled so its position reaches telemetry and the on-board log, which is
+# how you find the airframe after it lands. Set GPS_TYPE=0 from a ground station to
+# switch it off entirely; 1 = auto-detect.
+#
+# It is deliberately kept OUT of the flight control solution. The EK3_SRC settings
+# below tell the EKF to use baro for height and nothing for horizontal position or
+# velocity, so the attitude and climb-rate estimates the fins fly on come from
+# baro + IMU alone.
+#
+# Why: a GPS receiver loses lock under high-g boost and high dynamics -- exactly the
+# phase where control matters most -- and a dropout feeding the EKF mid-boost is far
+# more dangerous than simply never trusting it. Raw GPS for recovery is useful;
+# GPS in the control loop is not.
+#
+# Consequence: with no GPS in the EKF there is no position solution, so no home is
+# ever set. That is expected. GLOBAL_POSITION_INT will not be valid; use the raw
+# GPS_RAW_INT message for tracking. Arming resets the height datum to the rail.
+GPS_TYPE         1
 EK3_SRC1_POSXY   0
 EK3_SRC1_VELXY   0
 EK3_SRC1_POSZ    1

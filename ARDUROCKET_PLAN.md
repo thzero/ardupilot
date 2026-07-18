@@ -294,6 +294,37 @@ more gently, or `0` to command vertical immediately with no blend.
 **So fin travel SHOULD rise with rail tilt** — a rocket launched 20° off vertical has more
 correcting to do than one launched vertical. That is correct behaviour, not a failure.
 
+## 3c. GPS: tracking only, never control
+
+GPS is **fitted and polled, but kept out of the flight control solution.**
+
+| | |
+|---|---|
+| **Purpose** | Recovery. Raw position goes to telemetry and the on-board log so the airframe can be found after it lands. |
+| **Enable/disable** | `GPS_TYPE` — standard, GCS-settable. `1` = auto-detect (default), `0` = off. |
+| **In the EKF?** | **No.** `EK3_SRC1_POSXY=0`, `EK3_SRC1_VELXY=0`, `EK3_SRC1_POSZ=1` (baro). |
+
+**Why it is excluded from control.** A GPS receiver loses lock under high-g boost and high
+dynamics — exactly the phase where control matters most. A dropout feeding the estimator
+mid-boost is far more dangerous than never trusting it. Attitude and climb rate (which
+apogee detection and the fin gain scheduling ride on) come from **baro + IMU alone**.
+
+**It must be polled or it does nothing.** `AP_GPS::update` is in the scheduler at 50 Hz.
+`gps.init()` alone is not enough — without the periodic task the driver produces no fixes
+at all, which was the state before this was added.
+
+**Consequences of no GPS in the EKF, all expected:**
+- There is **no position solution and therefore no home**. This is normal for this vehicle.
+- `GLOBAL_POSITION_INT` will not be valid — **use `GPS_RAW_INT` for tracking**, which is
+  the raw driver output and does not need an EKF origin.
+- Arming resets the height datum to the rail, so altitude and climb rate are rail-relative.
+
+**Pre-arm warning.** If the EKF ever *does* produce a horizontal position solution, arming
+emits `Rocket: EKF has a horizontal position solution - GPS should be tracking only`. It
+warns rather than refuses, because this is a configuration opinion rather than a hardware
+fault — but it says so every time, because the in-flight symptom would otherwise be
+baffling to diagnose.
+
 ## 4. Scheduler table
 
 `Blimp/Blimp.cpp:50-95` is the shape. Entries **must be priority-ordered**; the table is interleaved

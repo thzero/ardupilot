@@ -41,8 +41,11 @@ const AP_HAL::HAL& hal = AP_HAL::get_HAL();
   - ekf_check / check_vibration: in Copter these exist to trigger mode changes,
     and this vehicle has no modes to change to. A rocket is also guaranteed to be
     a high-vibration airframe, so check_vibration would fire on every flight.
-  - AP_GPS::update: attitude hold needs no position. The EKF runs on baro + IMU,
-    which is also where the speed estimate for fin gain scheduling comes from.
+  GPS is present but is a TRACKING sensor, not a control sensor. It is polled so its
+  raw position reaches telemetry and the log (which is how you find the airframe after
+  it lands), but EK3_SRC1_POSXY/VELXY exclude it, so it never feeds the attitude or
+  velocity solution the fins fly on. GPS under high-g boost drops lock exactly when
+  control matters most, which is why it is kept out of the loop.
 
   The GCS tasks stay despite there being no ground station: autotest drives the
   vehicle over MAVLink. Keep the transport, drop the failsafes.
@@ -57,6 +60,9 @@ const AP_Scheduler::Task ArduRocket::scheduler_tasks[] = {
     // flight stage detection and the attitude controller
     FAST_TASK(run_rocket_control),
 
+    // GPS for tracking/recovery only -- see the note above. Cheap, and it must be
+    // polled or the driver produces no fixes at all.
+    SCHED_TASK_CLASS(AP_GPS,               &rocket.gps,                update,          50, 200,   9),
     SCHED_TASK(update_batt_compass,   10,    120,  12),
     SCHED_TASK(update_altitude,       10,    100,  21),
 #if HAL_LOGGING_ENABLED

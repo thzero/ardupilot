@@ -71,6 +71,23 @@ bool AP_Arming_Rocket::pre_arm_checks(bool display_failure)
         }
     }
 
+    /*
+      GPS must not be in the flight control solution.
+
+      Having a GPS fitted is fine and useful -- its raw position goes to telemetry
+      and the log so the airframe can be found after landing. What must not happen
+      is the EKF using it for position or velocity: a receiver loses lock under
+      high-g boost, and a dropout feeding the estimator mid-flight is far worse than
+      never trusting it. Warn rather than refuse, because this is a configuration
+      opinion rather than a hardware fault -- but say it every time, because the
+      symptom in flight would be baffling.
+     */
+    Vector2f posNE;
+    if (AP::ahrs().get_relative_position_NE_origin_float(posNE)) {
+        gcs().send_text(MAV_SEVERITY_WARNING,
+                        "Rocket: EKF has a horizontal position solution - GPS should be tracking only");
+    }
+
     return true;
 }
 
