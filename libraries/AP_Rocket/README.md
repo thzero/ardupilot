@@ -69,13 +69,49 @@ never references a vehicle type, so it stays portable.
 | `RKT_LAUNCH_MS` | 50 | Launch must hold this long. Guards against a single noisy sample on a vibrating pad. |
 | `RKT_BURN_G` | 0.2 | Burnout threshold in g (coasting reads near zero — drag only). |
 | `RKT_BURN_MS` | 100 | Burnout debounce, so a mid-burn thrust dip is not read as burnout. |
-| `RKT_APOG_MS` | 500 | Apogee debounce. This is what stops the fins, so it must be robust to velocity-estimate noise near the top. |
+| `RKT_APOG_MS` | 500 | Apogee debounce. This is what stops the fins, so it must be robust to velocity-estimate noise near the top. **See below — this one is load-bearing.** |
+
+### `RKT_APOG_MS` is doing real work — measured
+
+Climb rate is noisy even when nothing is moving. Measured in SITL, stationary on the rail:
+
+| quantity | sd | peak-to-peak |
+|---|---|---|
+| `VFR_HUD` climb rate | 0.093 m/s | **1.25 m/s** |
+
+So the climb-rate sign flips negative *constantly* while the vehicle sits still. The only thing standing
+between that and a spurious apogee is the 500 ms debounce, which requires the rate to stay negative
+**continuously**.
+
+This is benign in flight for most of the trajectory, where the true climb rate is large compared with
+the noise. It gets thin exactly at the top, where the real rate passes slowly through zero — which is
+also the moment the decision is being made.
+
+**If the fins ever stop early, look here first, not at the stage machine.** The stage machine is a
+debounced sign test; there is very little in it to go wrong. Raising `RKT_APOG_MS` trades a later
+apogee declaration (fins stay live slightly longer into the descent) against immunity to noise. Lowering
+it does the reverse and is the riskier direction.
+
+Guard against the other failure too: `rocket_control.cpp` reports a **climbing** value when there is no
+velocity estimate at all, so a missing reading can never fake an apogee.
 
 ## No GPS
 
 The vehicle flies on **barometer + IMU only**. Climb rate (for apogee, and for the fin gain scheduling)
-comes from `AP_AHRS::get_velocity_D(velD, true)` — the high-vibration path, which uses the baro/IMU
-vertical rate rather than a GPS-backed velocity. Because there is no GPS the EKF never gets a home from
+comes from `AP_AHRS::get_velocity_D(velD, true)`.
+
+That climb rate is an **EKF3 state fed by baro + IMU — not a numerical derivative of the barometer**.
+The distinction is what makes apogee detection viable: differentiating a barometer would amplify its
+noise into an unusable velocity signal and add lag exactly where it cannot be afforded. There is no
+hand-rolled 1D filter here and there should not be one; EKF3 already fuses the accelerometer, which a
+baro-only filter could not.
+
+The `true` is the `high_vibes` flag. It does **not** mean "avoid GPS" — it selects
+`get_vert_pos_rate_D()`, the vertical rate kinematically *consistent with* the EKF's vertical position,
+instead of the EKF's velocity state, which can diverge from position while the filter corrects errors
+(`AP_AHRS.cpp:1188`). A rocket is guaranteed high-vibration, which is the case that flag exists for.
+
+Because there is no GPS the EKF never gets a home from
 one, so `AP_Arming_Rocket::arm()` calls `ahrs.resetHeightDatum()`, referencing every altitude and climb
 rate to the launch rail.
 

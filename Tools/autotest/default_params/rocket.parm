@@ -128,6 +128,15 @@ ARMING_SKIPCHK   -1
 # Lower = level out sooner and harder. 0 = command vertical immediately, no blend.
 RKT_LEVEL_Q      600
 
+# Stop driving the fins below this dynamic pressure. Below it they cannot produce a
+# useful moment however far they deflect, so steering there only wastes travel and
+# winds up the integrators. 50 Pa is about 9 m/s. Set 0 to steer all the way to apogee.
+#
+# NOTE this does NOT eliminate large fin deflections during coast: measured coast
+# travel is dominated by genuine correction at q well ABOVE this threshold, where the
+# fins do have authority. This guards the true zero-authority tail only.
+RKT_MIN_Q        50
+
 # --- Airframe ---------------------------------------------------------------
 # The flight controller is mounted nose-up.
 AHRS_ORIENTATION 24

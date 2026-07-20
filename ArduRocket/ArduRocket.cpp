@@ -69,6 +69,7 @@ const AP_Scheduler::Task ArduRocket::scheduler_tasks[] = {
     SCHED_TASK(full_rate_logging,     50,     50,  33),
 #endif
     SCHED_TASK_CLASS(AP_Notify,            &rocket.notify,             update,          50,  90,  36),
+    SCHED_TASK(send_rocket_telemetry,  5,    100,  38),
     SCHED_TASK(one_hz_loop,            1,    100,  39),
     SCHED_TASK_CLASS(GCS,                  (GCS*)&rocket._gcs,         update_receive, 400, 180,  51),
     SCHED_TASK_CLASS(GCS,                  (GCS*)&rocket._gcs,         update_send,    400, 550,  54),

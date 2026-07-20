@@ -101,6 +101,14 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("RKT_LEVEL_Q", 3, ParametersG2, level_q, 600.0f),
 
+    // @Param: RKT_MIN_Q
+    // @DisplayName: Dynamic pressure below which fins stop being driven
+    // @Description: Fin force scales with dynamic pressure, so below some value the fins cannot produce a useful moment however far they deflect. Below this threshold the controller stops driving them and centres them, rather than saturating against a plant that cannot respond. This matters approaching apogee, where the gain scheduling would otherwise command near-full deflection to no effect. Set 0 to keep steering all the way to apogee.
+    // @Units: Pa
+    // @Range: 0 500
+    // @User: Standard
+    AP_GROUPINFO("RKT_MIN_Q", 4, ParametersG2, min_q, 50.0f),
+
     // @Group: RKT_
     // @Path: ../libraries/AP_Rocket/AP_Rocket.cpp
     AP_SUBGROUPINFO(rocket, "RKT_", 1, ParametersG2, AP_Rocket),

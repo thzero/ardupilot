@@ -29,6 +29,39 @@ extern const AP_HAL::HAL& hal;
 
 using namespace SITL;
 
+/*
+  Thrust curve taken from the OpenRocket export: fast rise to a 1923 N peak at
+  0.2 s, a long ~1700 N sustain, then a tail-off to zero by 4.7 s.
+
+  The tail-off matters more than it looks: burnout is detected from measured axial
+  acceleration (RKT_BURN_G / RKT_BURN_MS), so a gradual decay is what those
+  thresholds actually have to discriminate. A square pulse would make burnout
+  detection look far easier than it is.
+ */
+const float Rocket::thrust_time[Rocket::THRUST_PTS] = {
+    0.00f, 0.05f, 0.10f, 0.20f, 0.50f, 1.00f, 1.50f,
+    2.00f, 2.50f, 3.00f, 3.50f, 4.00f, 4.40f, 4.70f
+};
+const float Rocket::thrust_newtons[Rocket::THRUST_PTS] = {
+    0.0f, 717.0f, 1433.0f, 1922.8f, 1720.0f, 1695.0f, 1672.0f,
+    1550.0f, 1330.0f, 1150.0f, 760.0f, 226.0f, 62.0f, 0.0f
+};
+
+float Rocket::thrust_at(float t) const
+{
+    if (t <= thrust_time[0]) {
+        return thrust_newtons[0];
+    }
+    for (uint8_t i = 1; i < THRUST_PTS; i++) {
+        if (t <= thrust_time[i]) {
+            const float span = thrust_time[i] - thrust_time[i-1];
+            const float frac = is_positive(span) ? (t - thrust_time[i-1]) / span : 0.0f;
+            return thrust_newtons[i-1] + frac * (thrust_newtons[i] - thrust_newtons[i-1]);
+        }
+    }
+    return 0.0f;
+}
+
 Rocket::Rocket(const char *frame_str) :
     Aircraft(frame_str),
     arm_time_ms(0),
@@ -42,10 +75,13 @@ Rocket::Rocket(const char *frame_str) :
     ground_behavior = GROUND_BEHAVIOR_TAILSITTER;
     frame_height = 0.1f;
 
-    // "rocket-stable" gives a passively stable airframe (centre of pressure behind
-    // centre of gravity), which is useful for separating controller bugs from the
-    // genuinely unstable plant.
-    if (strstr(frame_str, "-stable")) {
+    /*
+      The modelled airframe is passively STABLE by default, because the real one is
+      (CP ~3.5-5 calibers aft of CG per the export). "rocket-unstable" flips the sign
+      to model a CP-ahead-of-CG airframe, which is a far harder plant and worth
+      testing the controller against deliberately.
+     */
+    if (strstr(frame_str, "-unstable")) {
         instability_gain = -instability_gain;
     }
 
@@ -114,19 +150,27 @@ void Rocket::update(const struct sitl_input &input)
         arm_time_ms = 0;
         ignited = false;
         burn_elapsed = 0.0f;
+        impulse_used = 0.0f;
     }
 
     float thrust = 0.0f;
     if (ignited && burn_elapsed < burn_time) {
-        thrust = motor_thrust;
+        thrust = thrust_at(burn_elapsed);
         burn_elapsed += delta_time;
         if (burn_elapsed >= burn_time) {
             ::printf("Rocket: burnout\n");
         }
     }
 
-    // Propellant burns off, so the vehicle gets lighter through the boost.
-    const float burn_frac = constrain_float(burn_elapsed / burn_time, 0.0f, 1.0f);
+    /*
+      Propellant depletes with IMPULSE DELIVERED, not with time. With a real thrust
+      curve those differ substantially: this motor spends its first second at near
+      peak thrust and its last second barely producing any, so a linear-in-time mass
+      model would have the airframe far too heavy early and too light late -- which
+      distorts acceleration exactly where launch detection reads it.
+     */
+    impulse_used += thrust * delta_time;
+    const float burn_frac = constrain_float(impulse_used / TOTAL_IMPULSE_NS, 0.0f, 1.0f);
     mass = dry_mass + propellant_mass * (1.0f - burn_frac);
 
     /*

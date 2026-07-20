@@ -32,6 +32,10 @@ protected:
     MAV_RESULT handle_command_int_packet(const mavlink_command_int_t &packet,
                                          const mavlink_message_t &msg) override;
 
+    // Handles the messages the shared stream tables ask for but the base class
+    // leaves to the vehicle. Omitting this is NOT harmless -- see the .cpp.
+    bool try_send_message(enum ap_message id) override;
+
 private:
 
     uint8_t base_mode() const override;

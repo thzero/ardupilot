@@ -42,6 +42,61 @@
 > | `AP_Arming` not registered in `Parameters.cpp` | All `ARMING_*` params simply did not exist. |
 > | Loop rate defaulted to 50 Hz | ArduRocket was not in the 400 Hz group in `AP_Scheduler.cpp`. |
 > | Apogee used GPS-backed velocity | Switched to `get_velocity_D(velD, true)` (baro+IMU) since there is no GPS. |
+> | `try_send_message()` not overridden | The **shared** stream tables list `MSG_WIND`, which every other vehicle implements and the base class refuses. A GCS requesting all data streams triggered `PANIC: Sending unknown ap_message 36`. In SITL that **kills the vehicle**; on hardware the panic is compiled out and it instead floods the link with `Sending unknown message (36)` at the stream rate. Only reachable with a real GCS attached, so the scripted tests never saw it. |
+>
+> ### Ground station connection (WSL2)
+>
+> Connect the GCS over **TCP to `127.0.0.1:5760`**; WSL2 forwards Windows localhost
+> into WSL. Verified with ArduDeck, and with pymavlink.
+>
+> Do **not** use `--serial0 udpclient:<windows-host>:14550`. Measured: SITL sends
+> heartbeats correctly to `udpclient:127.0.0.1`, but aimed at the WSL gateway IP it
+> emits **zero** datagrams — confirmed against `/proc/net/snmp` OutDatagrams with a
+> control send on the same path proving the counter works, and re-confirmed after the
+> `MSG_WIND` crash above was fixed, so the two faults are independent. Ping to the
+> gateway is clean, so it is neither routing nor Windows Firewall. Unexplained; TCP
+> works, so it was not pursued further.
+>
+> Note SITL **blocks on startup** until the first TCP client connects (`Waiting for
+> connection ....`) and accepts **one** client at a time — GCS or test script, never both.
+>
+> ### The heading shown in the GCS is garbage, and that is expected
+>
+> On the rail the ground station's heading and roll swing through **~166°** while the
+> airframe stands perfectly still. This is **not** a fault and is not fixable.
+>
+> `ATTITUDE` reports Euler angles in the **body** frame, and a nose-up rocket sits at
+> body pitch = 90° — exactly the Euler singularity, where roll and yaw describe the
+> same rotation and neither is individually defined. Measured, stationary, 35 s:
+>
+> | quantity | mean | sd | peak-to-peak |
+> |---|---|---|---|
+> | **tilt of nose from vertical** | 0.086° | 0.043° | **0.156°** |
+> | direction the nose leans | 85.96° | 49.4° | 166.5° |
+> | Euler yaw (what the GCS shows) | 85.96° | 49.4° | 166.5° |
+>
+> Euler yaw tracks the lean *direction* exactly (85.961 vs 85.962). So the "heading"
+> is really "which way is the nose leaning" — and at 0.086° of tilt that direction is
+> meaningless, like asking which way you face standing on the North Pole. No filter
+> can invent information that is not in the signal.
+>
+> **This does not touch control.** The controller flies on `ahrs_view`
+> (`ROTATION_PITCH_90`), where the rocket presents as level and pitch ≈ 0 — nowhere
+> near the singularity. That is the entire reason the view exists.
+>
+> Two traps worth remembering, both of which caught me here:
+> - *Do not* conclude "the estimate is drifting" from the angle between successive
+>   quaternions. That metric lumps tilt together with the degenerate lean direction,
+>   and reported 78.8° of apparent motion on an airframe holding within 0.16°.
+>   Decompose into tilt vs rotation-about-the-long-axis before judging.
+> - Do not try to stabilise or filter the displayed heading. It is undefined, not noisy.
+>
+> **What to show the pad crew instead:** `send_rocket_telemetry()` publishes
+> `NAMED_VALUE_FLOAT` named **`TILT`** at 5 Hz — the real angle from vertical, from
+> the same `tilt_from_vertical_deg()` the arming gate uses. Verified: 0.081° on a
+> vertical rail, **10.035° on `rocket-tilt10`**, agreeing with an independent
+> quaternion-derived tilt to **0.0009°**. That is the number that decides arming, so
+> it is the number worth putting on screen.
 >
 > Lesson for next time: **diff a new vehicle's startup against a known-working
 > minimal vehicle (Blimp) before instrumenting anything.** Most of the above were
@@ -130,7 +185,7 @@ directory name (`Tools/ardupilotwaf/ardupilotwaf.py:136`) — no build registrat
 | `system.cpp` | `init_ardupilot()`, `allocate_motors()`, **`ahrs_view = ahrs.create_view(ROTATION_PITCH_90);`** ← the key trick, and **`ahrs.init()` + `ins.init(scheduler.get_loop_rate_hz())`** — mandatory; without the IMU init the main loop blocks forever in `wait_for_sample()` and the vehicle never runs. | `ArduCopter/system.cpp:358-431`, `Blimp::startup_INS_ground()` |
 | `rocket_control.cpp` | The whole flight controller (§3). ~150 lines. Replaces the entire `mode*.cpp` family. | `ArduCopter/mode_stabilize.cpp:9-60` (spool-state switch) |
 | `AP_Arming_Rocket.h/.cpp` | `arm()` must reset the stage detector AND propagate the armed state: `hal.util->set_soft_armed(true)`, `motors->armed(true)`, logger/notify, and `ahrs.resetHeightDatum()` when there is no home (there never is — no GPS). Omitting the propagation leaves the stage machine stuck in PREP. Also overrides `rc_calibration_checks() → true` (no RC) and enforces vertical-and-still on the rail. | `Blimp/AP_Arming_Blimp.*` |
-| `GCS_Rocket.*`, `GCS_MAVLink_Rocket.*` | Required — `GCS::create_gcs_mavlink_backend()` is pure virtual under `HAL_GCS_ENABLED`. `frame_type()` → `MAV_TYPE_GENERIC` (no upstream `MAV_TYPE_ROCKET`). `custom_mode()` → flight stage. `base_mode()` must OR in `MAV_MODE_FLAG_SAFETY_ARMED` or every GCS shows the vehicle disarmed while it is live. Overrides `handle_command_int_packet()` to catch `MAV_CMD_DO_MOTOR_TEST` for the bench fin test (§3b). | `Blimp/GCS_*` |
+| `GCS_Rocket.*`, `GCS_MAVLink_Rocket.*` | Required — `GCS::create_gcs_mavlink_backend()` is pure virtual under `HAL_GCS_ENABLED`. `frame_type()` → `MAV_TYPE_GENERIC` (no upstream `MAV_TYPE_ROCKET`). `custom_mode()` → flight stage. `base_mode()` must OR in `MAV_MODE_FLAG_SAFETY_ARMED` or every GCS shows the vehicle disarmed while it is live. Overrides `handle_command_int_packet()` to catch `MAV_CMD_DO_MOTOR_TEST` for the bench fin test (§3b). **Must also override `try_send_message()`** to consume `MSG_WIND`: the stream tables are shared across all vehicles and every other vehicle implements it, so omitting it kills the vehicle in SITL and floods the link on hardware the moment a GCS requests all streams. | `Blimp/GCS_*` |
 | `Log.cpp` | `RKT` message: stage, tilt error, fin commands, spin rate, body-up accel, dynamic pressure. | `Blimp/Log.cpp` |
 | `RC_Channel_Rocket.h/.cpp` | **(added during implementation, not in original plan)** A minimal `RC_Channels` subclass. The vehicle has no receiver, but shared code (`AP_CRSF_Telem::queue_message`, reached from `GCS::send_text`) dereferences the `rc()` singleton unconditionally, so the object must exist or the process segfaults on the first status text. | `Blimp/RC_Channel_Blimp.*` |
 
@@ -241,6 +296,33 @@ If either is wrong, do not send the second ARM.
 20 degrees is the maximum rail tilt permitted by both **NAR and Tripoli** safety codes,
 so anything beyond it is either mis-mounted or a bad attitude solution.
 
+#### The tilt limit is a CONE, not a per-axis check
+
+The limit describes a **20° cone around vertical**, and the check asks exactly one
+question: is the nose inside that cone? `ArduRocket::tilt_from_vertical_deg()` is the
+single source of truth, computing the real geometric angle
+`acos(cos(view roll) × cos(view pitch))`. Both the arming gate and the `TILT`
+telemetry call it, so the number the pad crew reads is by construction the number
+that decides arming.
+
+Getting this wrong is easy and it failed in **both** directions before landing here:
+
+| scheme | asks | at roll 14 / pitch 14 | at roll 20 / pitch 20 |
+|---|---|---|---|
+| `\|roll\| + \|pitch\|` *(original, wrong)* | is the sum ≤ 20? | sum 28 → **refused at 19.7° real tilt** | 40 → refused |
+| per-axis `\|roll\| ≤ 20 && \|pitch\| ≤ 20` | is each ≤ 20? | accepted | **accepted at 28.0° real tilt** |
+| **`acos(cos r × cos p)`** *(current)* | how far is the nose from vertical? | 19.7° → accepted | 28.0° → refused |
+
+The sum is **too strict**: it treats a diagonal lean as worse than a cardinal one
+purely as an artifact of the decomposition, tightening a 20° limit to as little as
+**14.1°** and refusing rails that NAR and Tripoli both permit.
+
+Per-axis is **too loose, in the unsafe direction**: 20° on each axis is 28° of real
+tilt, well outside the safety-code limit, and it would arm.
+
+Leaning 20° north, 20° east or 20° north-east are all exactly 20° of tilt. Only the
+cone treats them identically, which is what the safety codes actually mean.
+
 ### Bench fin test (on demand, from a ground station)
 
 `MAV_CMD_DO_MOTOR_TEST` triggers the same fin sequence on demand, so the fins can be
@@ -294,6 +376,22 @@ more gently, or `0` to command vertical immediately with no blend.
 **So fin travel SHOULD rise with rail tilt** — a rocket launched 20° off vertical has more
 correcting to do than one launched vertical. That is correct behaviour, not a failure.
 
+### Steering stops when there is no authority left
+
+`RKT_MIN_Q` (default 50 Pa, ≈9 m/s) stops driving the fins below a dynamic pressure at
+which they cannot produce a useful moment however far they deflect. Without it the
+scheduling (`Q_REF/q`, capped at `GAIN_MAX`) would drive them hard against a plant that
+cannot respond, wasting travel and winding up integrators just before shutdown.
+
+`ARMED` is deliberately exempt: q is ~0 on the rail too, but the fins must already be
+tracking attitude when the rail releases.
+
+**Measured caveat, worth knowing before tuning:** adding this did **not** reduce observed
+coast fin travel (400 µs before and after). That peak occurs at q well *above* the
+threshold, where the fins genuinely have authority and are correcting a real tip-over as
+speed bleeds off. It is control effort, not scheduling runaway. `RKT_MIN_Q` guards only
+the true zero-authority tail near apogee.
+
 ## 3c. GPS: tracking only, never control
 
 GPS is **fitted and polled, but kept out of the flight control solution.**
@@ -324,6 +422,81 @@ emits `Rocket: EKF has a horizontal position solution - GPS should be tracking o
 warns rather than refuses, because this is a configuration opinion rather than a hardware
 fault — but it says so every time, because the in-flight symptom would otherwise be
 baffling to diagnose.
+
+## 3d. Pad procedure (from a ground station)
+
+Operational checklist for driving the vehicle from ArduDeck / QGroundControl / Mission
+Planner. Every claim below was re-verified against the build; the measured values are
+from SITL runs, not from memory.
+
+Connect over **TCP `127.0.0.1:5760`** (see the WSL2 note near the top — do not use UDP).
+
+### a) Bench test — the fin check
+
+`MAV_CMD_DO_MOTOR_TEST` is reused as "run the fin sequence", because every GCS already
+has UI for it (look for a **Motor Test** panel). **All of its parameters — motor number,
+throttle, duration — are ignored.** The sequence is fixed.
+
+You get `Rocket: FIN BENCH TEST - watch the fins`, then each fin driven in turn and
+announced as `Rocket: fin N`:
+
+| | |
+|---|---|
+| per fin | 500 ms one way, 500 ms the other, 300 ms centred = 1300 ms |
+| total | 4 fins × 1300 ms = **5.2 s** |
+
+Two deliberate properties:
+- It is the **identical code path** as the arming check, so what you verify on the bench
+  is exactly what runs on the rail.
+- It does **not** satisfy the arming gate, and is refused outright while armed. A bench
+  run in the workshop must never let anyone skip the on-the-rail check.
+
+> **This is the step that catches the one fatal bug software cannot detect.** A reversed
+> servo, a backwards linkage, or swapped fins will arm and fly happily. Physically watch
+> each announced fin move the direction you expect. See "What the fin check DOES NOT do".
+
+### b) Prep — params and telemetry
+
+**The one change that matters before a real flight:** `ARMING_SKIPCHK` is `-1` (skip
+everything), a SITL bring-up shortcut because the simulated board has no accel
+calibration. Set it to **`21064`** for flight — skips only absent hardware (GPS, RC,
+airspeed, mission) and keeps baro + INS. Apogee detection rides on the baro; a dead baro
+means the fins never stop.
+
+Things that look broken in the GCS but are correct:
+
+| What you see | Why |
+|---|---|
+| Throttle always 0 | Solid motor. There is no throttle. |
+| Heading/roll swinging ~166° | Euler singularity at nose-up. **Not a fault, not fixable** — see the heading section near the top. Watch `TILT` instead. |
+| `GLOBAL_POSITION_INT` lat/lon = 0 | No horizontal fix in the EKF, by design. **Its `relative_alt` IS valid** — verified −0.232 m on the pad. For *position*, read `GPS_RAW_INT`. |
+| Mode is a bare number 0–5 | `send_available_mode()` returns 0. PREP/FINCHECK/ARMED/BOOST/COAST/DESCENT. Any mode-change control does nothing: `set_mode()` refuses everything by design. |
+
+Worth watching:
+- **`TILT`** (`NAMED_VALUE_FLOAT`, 5 Hz) — angle from vertical, the same number the arming
+  gate uses. 0.08° on a vertical rail; verified 10.035° on `rocket-tilt10`; tracked to
+  161.4° during descent, so it stays meaningful for the whole flight.
+- **`VFR_HUD` altitude** — barometer, rail-relative after arming.
+- **`VFR_HUD` airspeed** — EKF speed, peaked at 408.6 m/s in flight. **NOT the fin gain
+  scheduling input**, despite what an earlier comment claimed: this is
+  `get_velocity_NED()`, the scheduler uses `get_velocity_D(velD, true)`. They track each
+  other only because the motion is near-vertical (408.6 vs 407.9 m/s).
+
+### c) Arm — two presses, and the first one "fails"
+
+Pre-arm gates: **tilt within a 20° cone** of vertical, gyro < 15 °/s, and all four fins
+assigned to `SERVO1-4_FUNCTION` = 190–193.
+
+1. **ARM.** Runs the fin check and **returns FAILED** (result 4). The vehicle enters
+   FINCHECK (stage 1) and is **not armed**.
+2. **Watch the 5.2 s sequence** and confirm each fin is the one announced.
+3. **ARM again** within **60 s** → result 0. You get `Rocket: fin check confirmed`, then
+   `Rocket: rail attitude X/Y deg` (the calibration capture), then
+   `Rocket: armed, on the rail`.
+
+> ⚠️ **The GCS will show that first ARM as an error popup.** That is the design working.
+> It is exactly the kind of thing that gets muscle-memoried into "press until it works",
+> so know it before standing at a pad.
 
 ## 4. Scheduler table
 
@@ -410,6 +583,18 @@ unchanged. Required changes:
     activity. (Detecting via velocity means the library needs a vertical-velocity input from the vehicle,
     or the vehicle owns the apogee test and the library just carries the flag.)
   - `hold_integrators()` stays `stage() == PRE_LAUNCH`. `steering_active()` = `stage() ∈ {BOOST, COAST}`.
+
+  **`RKT_APOG_MS` is the load-bearing parameter here.** Climb rate measures **1.25 m/s
+  peak-to-peak while stationary**, so its sign flips negative constantly; only the 500 ms
+  continuous-negative debounce stands between that and a spurious apogee — and it is
+  thinnest exactly at the top, where the true rate passes slowly through zero. If fins ever
+  stop early, look at this parameter first, not at the stage machine, which is only a
+  debounced sign test. Full detail and the tuning direction are in
+  `libraries/AP_Rocket/README.md`.
+
+  Climb rate is an **EKF3 state fed by baro + IMU, not a differentiated barometer** — that
+  is what makes the detection viable at all. Do not replace it with a hand-rolled 1D filter:
+  EKF3 already fuses the accelerometer, which a baro-only filter cannot.
 - **Add debounce to launch detection.** The README already flags "single-sample launch detection". A
   single accel sample crossing 1.5 g is a hair-trigger on a vibrating pad; require N consecutive samples.
 - Burn time varies 0.8–8 s (up to 16 s), so any timeout guards must span that range, not assume ~2 s.

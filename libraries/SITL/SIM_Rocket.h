@@ -54,17 +54,26 @@ public:
     }
 
 private:
-    // ---- motor ----
-    float dry_mass = 0.80f;         // kg, airframe without propellant
-    float propellant_mass = 0.20f;  // kg, burnt linearly over burn_time
-    float motor_thrust = 90.0f;     // N, roughly a mid-power hobby motor
-    float burn_time = 2.0f;         // s
+    /*
+      ---- airframe and motor ----
+
+      These are derived from a real OpenRocket export (see ARDUROCKET_PLAN.md §9),
+      not invented. Note that export mixes units: lengths/speeds imperial, thrust in
+      newtons, mass in ounces. Everything below is SI.
+
+      Summary of the modelled vehicle: ~11.2 kg off the pad, M-class motor
+      (~5400 N.s total impulse), 4.02 in diameter, Mach 1.2, ~3900 m apogee.
+     */
+    float dry_mass = 8.47f;         // kg, burnt out
+    float propellant_mass = 2.72f;  // kg actually consumed (11.19 -> 8.47)
+    float burn_time = 4.70f;        // s to zero thrust
     float ignition_delay = 3.0f;    // s after arming, i.e. the launch controller
 
     // ---- inertia ----
-    // A slender rocket: hard to pitch/yaw, trivially easy to spin.
-    float inertia_tilt = 0.083f;    // kg m^2 about body Y and Z (m*L^2/12, L~1m)
-    float inertia_spin = 0.0015f;   // kg m^2 about body X
+    // Slender body: hard to pitch/yaw, easy to spin. Estimated from mass and an
+    // assumed ~1.5 m length (m*L^2/12); the export did not carry usable MOI columns.
+    float inertia_tilt = 1.80f;     // kg m^2 about body Y and Z
+    float inertia_spin = 0.015f;    // kg m^2 about body X (0.5*m*r^2, r=51mm)
 
     // ---- aerodynamics ----
     // Moment produced per unit fin deflection per unit dynamic pressure [N m / Pa].
@@ -73,14 +82,33 @@ private:
     // spinning the airframe uses the fins edge-on.
     float fin_spin_gain = 0.0008f;
     /*
-      Destabilising moment per radian of angle of attack per unit dynamic pressure
-      [N m / (Pa rad)]. POSITIVE means centre of pressure ahead of centre of
-      gravity, i.e. the airframe diverges from straight flight and must be actively
-      held. Set negative via the frame string for a passively stable airframe.
+      Pitch/yaw moment per radian of angle of attack per unit dynamic pressure
+      [N m / (Pa rad)].
+
+      SIGN CONVENTION: positive = centre of pressure AHEAD of centre of gravity,
+      i.e. the airframe diverges and must be actively held. NEGATIVE = CP aft of CG,
+      i.e. passively STABLE and self-correcting.
+
+      The real airframe is strongly stable -- the export shows CP roughly 3.5 to 5
+      calibers aft of CG -- so the default is negative. That is a materially easier
+      plant than the unstable one this model originally assumed: the fins assist a
+      self-correcting airframe rather than fighting a diverging one.
+        magnitude ~ Cn_alpha * A_ref * (x_cp - x_cg)
+                  ~ 12 /rad * 0.0082 m^2 * 0.51 m
      */
-    float instability_gain = 0.0060f;
-    float drag_area = 0.0015f;      // Cd * frontal area, m^2
-    float rot_damping = 0.05f;      // aerodynamic rate damping [N m / (Pa rad/s)]
+    float instability_gain = -0.050f;
+    float drag_area = 0.0045f;      // Cd(0.55) * A_ref(0.0082 m^2), subsonic
+    float rot_damping = 0.35f;      // aerodynamic rate damping [N m / (Pa rad/s)]
+
+    // Thrust curve, from the export. Linear interpolation between breakpoints.
+    static constexpr uint8_t THRUST_PTS = 14;
+    static const float thrust_time[THRUST_PTS];
+    static const float thrust_newtons[THRUST_PTS];
+    float thrust_at(float t) const;
+
+    // Total impulse of the curve above, ~M-class. Mass depletes against this.
+    static constexpr float TOTAL_IMPULSE_NS = 5414.0f;
+    float impulse_used = 0.0f;
 
     /*
       ---- launch rail ----

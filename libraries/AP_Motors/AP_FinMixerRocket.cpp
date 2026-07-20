@@ -24,7 +24,6 @@
 #include <AP_Math/AP_Math.h>
 #include "AP_FinMixerRocket.h"
 #include <SRV_Channel/SRV_Channel.h>
-#include <stdio.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -125,19 +124,6 @@ void AP_FinMixerRocket::output_to_motors()
             case SpoolState::SPOOLING_DOWN:
                 // fins are driven by output_armed_stabilizing()
                 break;
-        }
-    }
-
-    // DEBUG (temporary): why are the fins not moving in flight?
-    {
-        static uint32_t dbg_last_ms = 0;
-        const uint32_t now = AP_HAL::millis();
-        if (now - dbg_last_ms >= 1000) {
-            dbg_last_ms = now;
-            ::fprintf(stderr, "FINDBG test=%d spool=%d armed=%d q=%.0f fin=%.3f rollin=%.3f pitchin=%.3f\n",
-                      (int)_test_fin, (int)_spool_state, (int)armed(),
-                      (double)_q_pa, (double)_fin_out[0],
-                      (double)_roll_in, (double)_pitch_in);
         }
     }
 

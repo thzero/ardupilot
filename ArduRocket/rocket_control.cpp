@@ -130,6 +130,35 @@ void ArduRocket::run_fin_check()
     motors->set_fin_test(fin, deflection);
 }
 
+float ArduRocket::tilt_from_vertical_deg() const
+{
+    if (ahrs_view == nullptr) {
+        return 0.0f;
+    }
+    // The view is rotated so that a vertical airframe reads as level, which puts
+    // tilt-from-vertical at the view's tilt-from-level and keeps it far away from
+    // the Euler singularity that makes the raw body angles useless here.
+    const float c = cosf(ahrs_view->roll) * cosf(ahrs_view->pitch);
+    return degrees(acosf(constrain_float(c, -1.0f, 1.0f)));
+}
+
+/*
+  Low-rate telemetry that exists purely so a human at the pad can see what matters.
+
+  A nose-up airframe sits exactly on the Euler yaw singularity, so the heading and
+  roll a ground station displays swing through ~166 degrees while the rocket stands
+  perfectly still -- measured at 0.086 deg of actual tilt. That is not fixable and
+  not a fault: at near-zero tilt the direction the nose leans is genuinely undefined.
+
+  The number that IS well conditioned, and the one that decides whether the vehicle
+  will arm, is tilt from vertical. NAMED_VALUE_FLOAT carries it under the name TILT
+  so any ground station can display or chart it without vehicle-specific support.
+ */
+void ArduRocket::send_rocket_telemetry()
+{
+    gcs().send_named_float("TILT", tilt_from_vertical_deg());
+}
+
 void ArduRocket::set_stage(FlightStage new_stage)
 {
     if (new_stage == stage) {
@@ -151,10 +180,15 @@ void ArduRocket::set_stage(FlightStage new_stage)
  */
 void ArduRocket::update_dynamic_pressure()
 {
-    // No GPS: the speed estimate is the vertical speed from baro + IMU. For a
-    // near-vertical rocket that is essentially the airspeed, which is all the fin
-    // gain scheduling needs. get_velocity_D(..., true) uses the high-vibration
-    // path, i.e. the baro/IMU vertical rate rather than a GPS-backed velocity.
+    // No GPS: the speed estimate is the vertical speed from the EKF, fed by baro +
+    // IMU. For a near-vertical rocket that is essentially the airspeed, which is all
+    // the fin gain scheduling needs.
+    //
+    // The `true` is the high_vibes flag. It does NOT mean "avoid GPS" -- it selects
+    // get_vert_pos_rate_D(), the vertical rate that is kinematically CONSISTENT with
+    // the EKF's vertical position, instead of the EKF's velocity state, which can
+    // diverge from position while the filter corrects errors. A rocket is guaranteed
+    // high-vibration, which is exactly the case that flag exists for.
     float velD;
     if (!ahrs.get_velocity_D(velD, true)) {
         dynamic_pressure_pa = 0.0f;
@@ -179,10 +213,14 @@ void ArduRocket::run_rocket_control()
 
     AP_Rocket &rkt = g2.rocket;
 
-    // Vertical velocity, positive up. Comes from baro + IMU (no GPS): get_velocity_D
-    // returns velocity DOWN, and the high-vibration flag makes it use the baro/IMU
-    // vertical rate rather than a GPS-backed value. If there is no estimate at all,
-    // report a climbing value so a missing reading can never fake an apogee.
+    // Vertical velocity, positive up. This is an EKF3 state fed by baro + IMU, NOT a
+    // numerical derivative of the barometer -- that distinction is what makes apogee
+    // detection viable, since differentiating a barometer would amplify its noise.
+    // get_velocity_D returns velocity DOWN, hence the negation; see
+    // update_dynamic_pressure() for what the high_vibes flag actually selects.
+    //
+    // If there is no estimate at all, report a climbing value so a missing reading
+    // can never fake an apogee.
     float climb_rate_ms = 1.0f;
     float velD;
     if (ahrs.get_velocity_D(velD, true)) {
@@ -239,9 +277,28 @@ void ArduRocket::run_rocket_control()
     case FlightStage::ARMED:
     case FlightStage::BOOST:
     case FlightStage::COAST: {
-        // Steer from arming all the way to apogee. Burnout (the BOOST->COAST edge)
-        // deliberately changes nothing here: aerodynamic fins still have upward
-        // airflow while coasting, so they keep holding vertical. Only DESCENT stops.
+        /*
+          Steer from arming toward apogee. Burnout (the BOOST->COAST edge)
+          deliberately changes nothing: aerodynamic fins still have upward airflow
+          while coasting, so they keep holding vertical.
+
+          But stop early if there is not enough dynamic pressure left to produce a
+          useful moment. Approaching apogee q collapses, and the gain scheduling
+          (Q_REF/q, capped at GAIN_MAX) would otherwise drive the fins to near-full
+          deflection against a plant that cannot respond -- achieving nothing, and
+          winding up the integrators in the last moments before shutdown. On the
+          rail q is also ~0, but ARMED is excluded because the fins must already be
+          tracking attitude when the rail releases.
+         */
+        const bool no_authority = (stage != FlightStage::ARMED) &&
+                                  is_positive(g2.min_q) &&
+                                  (dynamic_pressure_pa < g2.min_q);
+        if (no_authority) {
+            motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::SHUT_DOWN);
+            attitude_control->reset_rate_controller_I_terms();
+            break;
+        }
+
         motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
         /*

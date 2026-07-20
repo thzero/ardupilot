@@ -101,6 +101,19 @@ public:
      */
     AP_Float level_q;
 
+    /*
+      Dynamic pressure below which the fins stop being driven.
+
+      Fin force scales with q, so below some threshold the fins simply cannot
+      produce a useful moment no matter how far they deflect. Without this the gain
+      scheduling (Q_REF/q, capped at GAIN_MAX) drives them hard against a plant that
+      cannot respond -- near apogee that means near-full deflection accomplishing
+      nothing, wasting travel and risking integrator windup right before shutdown.
+
+      Set 0 to disable and keep steering all the way to apogee.
+     */
+    AP_Float min_q;
+
     // Flight stage detection: launch gating and burnout shutdown.
     AP_Rocket rocket;
 

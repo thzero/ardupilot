@@ -27,12 +27,15 @@ bool AP_Arming_Rocket::pre_arm_checks(bool display_failure)
     // configuration error we can catch here rather than on the pad.
     const AP_AHRS &ahrs = AP::ahrs();
 
-    // Tilt from vertical. The board is mounted nose-up (AHRS_ORIENTATION), so a
-    // vertical airframe reads a large pitch in the raw AHRS; use the same rotated
-    // view the controller flies on, where vertical is level (near-zero tilt).
+    // Tilt from vertical, as the real geometric angle. This is the SAME call that
+    // feeds the TILT telemetry, so what the pad crew reads is what is gated on.
+    //
+    // NOTE this was previously |roll| + |pitch|, which overestimates whenever both
+    // axes are non-zero and so tightened this 20 deg limit to as little as 14.1 deg
+    // on a diagonally-leaning rail -- refusing to arm on setups that NAR and Tripoli
+    // both permit.
     if (rocket.ahrs_view != nullptr) {
-        const float tilt_deg = degrees(fabsf(rocket.ahrs_view->roll)) +
-                               degrees(fabsf(rocket.ahrs_view->pitch));
+        const float tilt_deg = rocket.tilt_from_vertical_deg();
         if (tilt_deg > RKT_ARM_TILT_MAX_DEG) {
             check_failed(display_failure, "not vertical (%.0f deg off)", (double)tilt_deg);
             return false;
@@ -72,21 +75,16 @@ bool AP_Arming_Rocket::pre_arm_checks(bool display_failure)
     }
 
     /*
-      GPS must not be in the flight control solution.
+      NOTE: there is deliberately no "is GPS in the EKF?" check here.
 
-      Having a GPS fitted is fine and useful -- its raw position goes to telemetry
-      and the log so the airframe can be found after landing. What must not happen
-      is the EKF using it for position or velocity: a receiver loses lock under
-      high-g boost, and a dropout feeding the estimator mid-flight is far worse than
-      never trusting it. Warn rather than refuse, because this is a configuration
-      opinion rather than a hardware fault -- but say it every time, because the
-      symptom in flight would be baffling.
+      An earlier version warned when the EKF had a horizontal position solution,
+      but that fires whenever the EKF has an ORIGIN -- which happens regardless of
+      whether GPS is fused for control -- so it was a false positive, and being in
+      pre_arm_checks it repeated on every periodic check and flooded the link.
+
+      Keeping GPS out of the control solution is enforced by configuration
+      (EK3_SRC1_POSXY/VELXY = 0, documented in rocket.parm), not by a runtime check.
      */
-    Vector2f posNE;
-    if (AP::ahrs().get_relative_position_NE_origin_float(posNE)) {
-        gcs().send_text(MAV_SEVERITY_WARNING,
-                        "Rocket: EKF has a horizontal position solution - GPS should be tracking only");
-    }
 
     return true;
 }

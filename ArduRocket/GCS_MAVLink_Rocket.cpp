@@ -69,8 +69,14 @@ uint64_t GCS_MAVLINK_Rocket::capabilities() const
 
 float GCS_MAVLINK_Rocket::vfr_hud_airspeed() const
 {
-    // no airspeed sensor; report the EKF speed, which is what the fin gain
-    // scheduling actually uses
+    // No airspeed sensor, so report the EKF's speed over ground. For a vertical
+    // rocket that is essentially airspeed.
+    //
+    // NOTE this is get_velocity_NED(), which is NOT the call the fin gain scheduling
+    // uses -- that is get_velocity_D(velD, true), the position-consistent vertical
+    // rate. The two track each other closely here only because the motion is very
+    // nearly vertical (measured in flight: 408.6 vs 407.9 m/s peak). Do not treat
+    // this field as a readout of the gain-scheduling input; it is a separate estimate.
     Vector3f vel_ned;
     if (!rocket.ahrs.get_velocity_NED(vel_ned)) {
         return 0;
@@ -101,6 +107,50 @@ void GCS_MAVLINK_Rocket::send_pid_tuning()
 uint8_t GCS_MAVLINK_Rocket::send_available_mode(uint8_t index) const
 {
     return 0;
+}
+
+/*
+  Vehicle-specific message sending.
+
+  This override is load-bearing even though it handles a single message. The
+  stream tables in GCS_MAVLink_Parameters.cpp are SHARED by every vehicle, and
+  they list some messages that the base GCS_MAVLINK cannot send because their
+  content is vehicle-specific. MSG_WIND is one: Plane, Copter, Rover, Sub, Blimp
+  and Tracker each implement it, so the base class treats reaching it as a bug.
+
+  Without this override a ground station that requests all data streams -- which
+  is a perfectly ordinary thing for a GCS to do on connect -- queues MSG_WIND,
+  it falls through to GCS_MAVLINK::try_send_message's default branch, and:
+
+    in SITL, that branch calls AP_HAL::panic() and the vehicle DIES outright;
+    on real hardware the panic is compiled out, so instead it emits
+    "Sending unknown message (36)" as STATUSTEXT at the full stream rate,
+    flooding the telemetry link for the rest of the flight.
+
+  Neither is acceptable, and the failure appears only once a real GCS connects,
+  which is why the scripted tests never caught it.
+ */
+bool GCS_MAVLINK_Rocket::try_send_message(enum ap_message id)
+{
+    switch (id) {
+
+    case MSG_WIND:
+        /*
+          Deliberately send nothing, following ArduSub and AntennaTracker.
+
+          A rocket carries no airspeed sensor and the EKF is given no horizontal
+          velocity source (see EK3_SRC1_* in rocket.parm), so there is no wind
+          estimate to report. Reporting a fabricated or stale zero would be worse
+          than reporting nothing: a ground station would display it as fact.
+
+          Returning true means "handled" -- the message is consumed, not deferred,
+          so it does not retry forever.
+         */
+        return true;
+
+    default:
+        return GCS_MAVLINK::try_send_message(id);
+    }
 }
 
 MAV_RESULT GCS_MAVLINK_Rocket::handle_command_int_packet(const mavlink_command_int_t &packet,

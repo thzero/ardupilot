@@ -153,6 +153,24 @@ public:
     // Start an on-demand fin test from a ground station (MAV_CMD_DO_MOTOR_TEST).
     // Refuses while armed. Does not affect the arming fin-check gate.
     bool start_bench_fin_test();
+
+    /*
+      Angle of the airframe away from TRUE VERTICAL, in degrees.
+
+      The single source of truth for "how far off vertical are we". Both the arming
+      gate and the TILT telemetry call this, so the number the pad crew reads is by
+      construction the same number that decides whether the vehicle will arm.
+
+      This is the real geometric angle, acos(cos(roll) * cos(pitch)), taken in the
+      rotated view the controller flies on (where vertical reads as level). It is
+      NOT |roll| + |pitch|: that sum overestimates whenever both axes are non-zero
+      -- 10 deg on each axis is 20 by the sum but only 14.1 deg of actual tilt --
+      which silently tightened a 20 deg limit to as little as 14.1 deg depending on
+      which way the rail leaned.
+
+      Returns 0 if the view does not exist yet.
+     */
+    float tilt_from_vertical_deg() const;
 private:
 
     // Battery
@@ -179,6 +197,7 @@ private:
     void read_AHRS(void);
     void update_altitude();
     void motors_output();
+    void send_rocket_telemetry();
 
     // rocket_control.cpp
     void run_rocket_control();
