@@ -138,8 +138,31 @@ RKT_LEVEL_Q      600
 RKT_MIN_Q        50
 
 # --- Airframe ---------------------------------------------------------------
-# The flight controller is mounted nose-up.
-AHRS_ORIENTATION 24
+# How the FLIGHT CONTROLLER BOARD is rotated relative to the airframe -- NOT how the
+# airframe sits on the pad. 0 = board X axis points out the nose, the conventional
+# mounting, same as a plane. Change this only if the board is physically rotated in
+# the airframe.
+#
+# It is NOT the job of this parameter to express "the rocket stands vertical". That is
+# done by the AP_AHRS_View(ROTATION_PITCH_90) the controller flies on, which presents
+# the nose-up airframe as level. Setting BOTH rotates twice: this was 24 (Pitch90),
+# which stacked on the view's 90 degrees and read a vertical rail as 88.8 degrees off
+# vertical. It went unnoticed only because AHRS_* was never registered, so the value
+# was silently discarded -- a wrong setting hidden by a dead one.
+AHRS_ORIENTATION 0
+
+# --- Compass: DISPLAY ONLY, never in the flight solution --------------------
+# The compass hardware stays enabled so the driver keeps reading it, but the EKF is
+# told not to use it for yaw. The flight code needs no heading at all: attitude hold
+# works on tilt, and spin is held by commanding yaw RATE zero off the gyro.
+#
+# The magnetometer is instead read directly in GCS_MAVLink_Rocket.cpp to produce a
+# heading for the ground station. That keeps a real compass rose on the pad without
+# ever letting a magnetically hostile environment -- steel motor casing, igniter
+# current -- reach the attitude solution the fins fly on.
+COMPASS_USE      0
+COMPASS_USE2     0
+COMPASS_USE3     0
 
 # No receiver. Without this the vehicle waits for RC it will never see.
 RC_PROTOCOLS     0

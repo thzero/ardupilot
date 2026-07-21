@@ -61,6 +61,34 @@ const AP_Param::Info ArduRocket::var_info[] = {
     // @Path: ../libraries/AP_Scheduler/AP_Scheduler.cpp
     GOBJECT(scheduler, "SCHED_", AP_Scheduler),
 
+    /*
+      Attitude estimation. AP_Vehicle does NOT register these for you -- Copter and
+      Blimp each register them in their own Parameters.cpp, and ArduRocket originally
+      did not. The failure is silent: a name in a .parm file that matches no
+      registered parameter is discarded with no error, so the settings simply had no
+      effect while appearing correct in the file.
+
+      Two settings this vehicle actually depends on were dead because of it:
+        AHRS_ORIENTATION - how the flight controller is mounted. Harmless in SITL,
+                           where the simulated airframe already starts nose-up, but
+                           on real hardware it is the only thing telling the filter
+                           which way the board is bolted in.
+        EK3_SRC1_*       - keeps GPS out of the flight solution, which is a stated
+                           safety property of this vehicle (see 3c). It was never on.
+     */
+
+    // @Group: COMPASS_
+    // @Path: ../libraries/AP_Compass/AP_Compass.cpp
+    GOBJECT(compass, "COMPASS_", Compass),
+
+    // @Group: AHRS_
+    // @Path: ../libraries/AP_AHRS/AP_AHRS.cpp
+    GOBJECT(ahrs, "AHRS_", AP_AHRS),
+
+    // @Group: EK3_
+    // @Path: ../libraries/AP_NavEKF3/AP_NavEKF3.cpp
+    GOBJECTN(ahrs.ekf3.EKF3, NavEKF3, "EK3_", NavEKF3),
+
     // @Group: ATC_
     // @Path: ../libraries/AC_AttitudeControl/AC_AttitudeControl.cpp,../libraries/AC_AttitudeControl/AC_AttitudeControl_Multi.cpp
     GOBJECTVARPTR(attitude_control, "ATC_", &rocket.attitude_control_var_info),

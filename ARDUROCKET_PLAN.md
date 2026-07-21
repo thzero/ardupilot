@@ -6,9 +6,9 @@
 > simulated flight**:
 >
 > ```
-> PREP -> ARMED -> BOOST -> COAST -> DESCENT -> PREP
-> fin travel:  0us     1us    39us    400us     stop
->              ignition ....... burnout ..... apogee
+> PREP -> FINCHECK -> ARMED -> BOOST -> COAST -> DESCENT -> PREP
+> fin travel:  0us      0us      0us    4us    400us    stop     0us
+>                                ignition ..... burnout ..... apogee
 > ```
 >
 > Verified: fins centred when disarmed, quiet on the rail (integrator gating),
@@ -42,6 +42,8 @@
 > | `AP_Arming` not registered in `Parameters.cpp` | All `ARMING_*` params simply did not exist. |
 > | Loop rate defaulted to 50 Hz | ArduRocket was not in the 400 Hz group in `AP_Scheduler.cpp`. |
 > | Apogee used GPS-backed velocity | Switched to `get_velocity_D(velD, true)` (baro+IMU) since there is no GPS. |
+> | **AHRS / compass / EKF3 never registered in `Parameters.cpp`** | The worst of the session. `AP_Vehicle` does not register these for you; Copter and Blimp each do it themselves. Result: **zero** `AHRS_*`, `EK3_*` and `COMPASS_*` parameters existed (param count 901; after the fix 1071). Every such line in `rocket.parm` was silently discarded, so **`AHRS_ORIENTATION` and the `EK3_SRC1_*` GPS exclusion had never once taken effect** — and §3c documented that exclusion as a safety property. Same silent-failure mode as `ARMING_CHECK`. |
+> | `AHRS_ORIENTATION 24` was wrong, and hidden by the bug above | It describes how the BOARD is rotated in the airframe, not that the rocket stands vertical — the `AP_AHRS_View(ROTATION_PITCH_90)` does that. Setting both rotates twice. The moment registration was fixed, tilt read **88.8° on a vertical rail**. Correct value is **0**. A wrong setting concealed by a dead one. |
 > | `try_send_message()` not overridden | The **shared** stream tables list `MSG_WIND`, which every other vehicle implements and the base class refuses. A GCS requesting all data streams triggered `PANIC: Sending unknown ap_message 36`. In SITL that **kills the vehicle**; on hardware the panic is compiled out and it instead floods the link with `Sending unknown message (36)` at the stream rate. Only reachable with a real GCS attached, so the scripted tests never saw it. |
 >
 > ### Ground station connection (WSL2)
@@ -60,43 +62,69 @@
 > Note SITL **blocks on startup** until the first TCP client connects (`Waiting for
 > connection ....`) and accepts **one** client at a time — GCS or test script, never both.
 >
-> ### The heading shown in the GCS is garbage, and that is expected
+> ### Heading and attitude reporting — SOLVED, but not the obvious way
 >
-> On the rail the ground station's heading and roll swing through **~166°** while the
-> airframe stands perfectly still. This is **not** a fault and is not fixable.
+> **Current behaviour:** heading comes STRAIGHT OFF THE MAGNETOMETER, computed in
+> `GCS_MAVLINK_Rocket::rocket_heading_rad()`, and the compass is kept out of the
+> flight solution entirely (`COMPASS_USE/2/3 = 0`). Verified against a SITL truth of
+> 353°: **357.3° with 12° peak-to-peak**, versus 95.7–167° from the EKF.
 >
-> `ATTITUDE` reports Euler angles in the **body** frame, and a nose-up rocket sits at
-> body pitch = 90° — exactly the Euler singularity, where roll and yaw describe the
+> The split is the design: the flight code never uses heading at all (attitude hold
+> works on tilt; spin is held by commanding yaw RATE zero off the gyro), while the
+> ground station still gets a usable compass rose.
+>
+> #### Why the EKF's yaw cannot be used
+>
+> `ATTITUDE` normally reports Euler angles in the **body** frame, and a nose-up rocket
+> sits at body pitch = 90° — the Euler singularity, where roll and yaw describe the
 > same rotation and neither is individually defined. Measured, stationary, 35 s:
 >
 > | quantity | mean | sd | peak-to-peak |
 > |---|---|---|---|
 > | **tilt of nose from vertical** | 0.086° | 0.043° | **0.156°** |
 > | direction the nose leans | 85.96° | 49.4° | 166.5° |
-> | Euler yaw (what the GCS shows) | 85.96° | 49.4° | 166.5° |
+> | raw Euler yaw | 85.96° | 49.4° | 166.5° |
 >
-> Euler yaw tracks the lean *direction* exactly (85.961 vs 85.962). So the "heading"
-> is really "which way is the nose leaning" — and at 0.086° of tilt that direction is
-> meaningless, like asking which way you face standing on the North Pole. No filter
-> can invent information that is not in the signal.
+> Euler yaw tracks the lean *direction* exactly (85.961 vs 85.962). At 0.086° of tilt
+> that direction is meaningless — like asking which way you face standing on the North
+> Pole.
 >
-> **This does not touch control.** The controller flies on `ahrs_view`
-> (`ROTATION_PITCH_90`), where the rocket presents as level and pitch ≈ 0 — nowhere
-> near the singularity. That is the entire reason the view exists.
+> #### The three fixes, in the order they were needed
 >
-> Two traps worth remembering, both of which caught me here:
-> - *Do not* conclude "the estimate is drifting" from the angle between successive
->   quaternions. That metric lumps tilt together with the degenerate lean direction,
->   and reported 78.8° of apparent motion on an airframe holding within 0.16°.
->   Decompose into tilt vs rotation-about-the-long-axis before judging.
-> - Do not try to stabilise or filter the displayed heading. It is undefined, not noisy.
+> 1. **Report `ATTITUDE` in the view, not the body frame** (`send_attitude()`). In the
+>    `ROTATION_PITCH_90` view a vertical rocket reads level, so roll/pitch become tilt
+>    and are well conditioned. Cut the swing 167° → 96°. `ATTITUDE_QUATERNION` is
+>    deliberately left untouched as a truthful ground-truth channel.
+> 2. **Heading is published in THREE messages, not one.** `ATTITUDE.yaw`,
+>    `VFR_HUD.heading`, and `GLOBAL_POSITION_INT.hdg` all get filled from AHRS yaw
+>    upstream. QGC drives its compass rose from `VFR_HUD`, so fixing only `ATTITUDE`
+>    changed nothing on screen. `send_vfr_hud()` is **not virtual** — route
+>    `MSG_VFR_HUD` through `try_send_message()` instead.
+> 3. **Compute heading from the magnetometer**, bypassing the EKF entirely.
 >
-> **What to show the pad crew instead:** `send_rocket_telemetry()` publishes
+> #### Traps, all of which caught me
+>
+> - *Do not* judge drift from the angle between successive quaternions. That metric
+>   lumps tilt together with the degenerate lean direction, and reported 78.8° of
+>   apparent motion on an airframe holding within 0.16°.
+> - *Do not* pass the view's rotation matrix to `Compass::calculate_heading()`. That
+>   helper pairs the matrix with the field vector in the **raw body** frame; mixing
+>   frames produced a 347° swing, worse than doing nothing. Rotate the field into the
+>   view frame first, then tilt-compensate.
+> - `EK3_MAG_CAL=4` (3-axis mag fusion always) genuinely helps the EKF — measured
+>   95.7° → 9.4° drift — so this is **not** purely structural, as first claimed. It is
+>   still **not** enabled: 3-axis fusion assumes a magnetically stable environment, and
+>   a steel motor casing plus igniter current is the opposite. It would also improve a
+>   number nothing reads.
+> - Distrust suspiciously perfect results. One run of this reported 0.067° drift, from
+>   a SITL process that had already died. Confirm the process is live before believing
+>   a number.
+>
+> **Also worth putting on screen:** `send_rocket_telemetry()` publishes
 > `NAMED_VALUE_FLOAT` named **`TILT`** at 5 Hz — the real angle from vertical, from
-> the same `tilt_from_vertical_deg()` the arming gate uses. Verified: 0.081° on a
+> the same `tilt_from_vertical_deg()` the arming gate uses. Verified: 0.068° on a
 > vertical rail, **10.035° on `rocket-tilt10`**, agreeing with an independent
-> quaternion-derived tilt to **0.0009°**. That is the number that decides arming, so
-> it is the number worth putting on screen.
+> quaternion-derived tilt to **0.0009°**. That is the number that decides arming.
 >
 > Lesson for next time: **diff a new vehicle's startup against a known-working
 > minimal vehicle (Blimp) before instrumenting anything.** Most of the above were
@@ -181,11 +209,11 @@ directory name (`Tools/ardupilotwaf/ardupilotwaf.py:136`) — no build registrat
 | `config.h` | Loop rate, and `AP_MISSION_ENABLED 0` / `AC_WPNAV_ENABLED 0`. **The SITL frame macros do NOT go here** — the original plan was wrong about that: `libraries/AP_HAL/SIMState.cpp` is a library and never includes a vehicle's `config.h`, so its `AP_SIM_FRAME_CLASS`/`_STRING` ladders must be edited directly (§8). | `Blimp/config.h` |
 | `ArduRocket.h` | `class ArduRocket : public AP_Vehicle`. Members: `Parameters g; ParametersG2 g2; AP_FinMixerRocket *motors; AC_AttitudeControl_Multi *attitude_control; AP_AHRS_View *ahrs_view; AP_Arming_Rocket arming; AP_Rocket rocket;` + `stage`. **No `AC_PosControl`, `AC_WPNav`, `AC_Loiter`.** | `Blimp/Blimp.h` shape; `ArduCopter/Copter.h:474-478` member set |
 | `ArduRocket.cpp` | Scheduler table (§4), `get_scheduler_tasks()`, `const AP_HAL::HAL& hal`, and the globals block: `ArduRocket rocket; AP_Vehicle& vehicle = rocket; AP_HAL_MAIN_CALLBACKS(&rocket);` — `AP_Vehicle& vehicle` is **load-bearing** (`AP_Vehicle.cpp:307` `extern AP_Vehicle& vehicle;`, consumed at static-init by `SCHED_TASK_CLASS`). `motors_output()` must do `calc_pwm()` → `cork()` → `output_ch_all()` → `motors->output()` → **`srv.push()`**; without the push the fin commands never reach the outputs and the servos sit at 0 PWM. | `Blimp/Blimp.cpp`, `Blimp/motors.cpp` |
-| `Parameters.h/.cpp` | `const AP_Param::Info ArduRocket::var_info[]` — **mandatory**; `load_parameters()`/`check_var_info()` run unconditionally in `AP_Vehicle::setup()`. Minimum `FORMAT_VERSION` + `AP_VAREND`. `AP_SUBGROUPINFO` for `RKT_`, `ATC_`, `MOT_`, `SERVO_`, and **`GOBJECT(arming, "ARMING_", AP_Arming_Rocket)`** — omit that and the `ARMING_*` params silently do not exist. | `Blimp/Parameters.cpp` |
+| `Parameters.h/.cpp` | `const AP_Param::Info ArduRocket::var_info[]` — **mandatory**; `load_parameters()`/`check_var_info()` run unconditionally in `AP_Vehicle::setup()`. Minimum `FORMAT_VERSION` + `AP_VAREND`. `AP_SUBGROUPINFO` for `RKT_`, `ATC_`, `MOT_`, `SERVO_`, and **`GOBJECT(arming, "ARMING_", AP_Arming_Rocket)`** — omit that and the `ARMING_*` params silently do not exist. **Also mandatory: `GOBJECT(compass, "COMPASS_", Compass)`, `GOBJECT(ahrs, "AHRS_", AP_AHRS)` and `GOBJECTN(ahrs.ekf3.EKF3, NavEKF3, "EK3_", NavEKF3)`.** `AP_Vehicle` does NOT register these; omitting them made `AHRS_ORIENTATION` and the `EK3_SRC1_*` GPS exclusion silently dead. See the bug table. | `Blimp/Parameters.cpp` |
 | `system.cpp` | `init_ardupilot()`, `allocate_motors()`, **`ahrs_view = ahrs.create_view(ROTATION_PITCH_90);`** ← the key trick, and **`ahrs.init()` + `ins.init(scheduler.get_loop_rate_hz())`** — mandatory; without the IMU init the main loop blocks forever in `wait_for_sample()` and the vehicle never runs. | `ArduCopter/system.cpp:358-431`, `Blimp::startup_INS_ground()` |
 | `rocket_control.cpp` | The whole flight controller (§3). ~150 lines. Replaces the entire `mode*.cpp` family. | `ArduCopter/mode_stabilize.cpp:9-60` (spool-state switch) |
 | `AP_Arming_Rocket.h/.cpp` | `arm()` must reset the stage detector AND propagate the armed state: `hal.util->set_soft_armed(true)`, `motors->armed(true)`, logger/notify, and `ahrs.resetHeightDatum()` when there is no home (there never is — no GPS). Omitting the propagation leaves the stage machine stuck in PREP. Also overrides `rc_calibration_checks() → true` (no RC) and enforces vertical-and-still on the rail. | `Blimp/AP_Arming_Blimp.*` |
-| `GCS_Rocket.*`, `GCS_MAVLink_Rocket.*` | Required — `GCS::create_gcs_mavlink_backend()` is pure virtual under `HAL_GCS_ENABLED`. `frame_type()` → `MAV_TYPE_GENERIC` (no upstream `MAV_TYPE_ROCKET`). `custom_mode()` → flight stage. `base_mode()` must OR in `MAV_MODE_FLAG_SAFETY_ARMED` or every GCS shows the vehicle disarmed while it is live. Overrides `handle_command_int_packet()` to catch `MAV_CMD_DO_MOTOR_TEST` for the bench fin test (§3b). **Must also override `try_send_message()`** to consume `MSG_WIND`: the stream tables are shared across all vehicles and every other vehicle implements it, so omitting it kills the vehicle in SITL and floods the link on hardware the moment a GCS requests all streams. | `Blimp/GCS_*` |
+| `GCS_Rocket.*`, `GCS_MAVLink_Rocket.*` | Required — `GCS::create_gcs_mavlink_backend()` is pure virtual under `HAL_GCS_ENABLED`. `frame_type()` → `MAV_TYPE_GENERIC` (no upstream `MAV_TYPE_ROCKET`). `custom_mode()` → flight stage. `base_mode()` must OR in `MAV_MODE_FLAG_SAFETY_ARMED` or every GCS shows the vehicle disarmed while it is live. Overrides `handle_command_int_packet()` to catch `MAV_CMD_DO_MOTOR_TEST` for the bench fin test (§3b). Overrides `send_attitude()` (view frame), `send_global_position_int()` and — via `try_send_message()` because `send_vfr_hud()` is not virtual — `MSG_VFR_HUD`, so that **all three** heading fields carry the magnetometer heading from `rocket_heading_rad()` instead of the EKF's meaningless nose-up yaw. **Must also override `try_send_message()`** to consume `MSG_WIND`: the stream tables are shared across all vehicles and every other vehicle implements it, so omitting it kills the vehicle in SITL and floods the link on hardware the moment a GCS requests all streams. | `Blimp/GCS_*` |
 | `Log.cpp` | `RKT` message: stage, tilt error, fin commands, spin rate, body-up accel, dynamic pressure. | `Blimp/Log.cpp` |
 | `RC_Channel_Rocket.h/.cpp` | **(added during implementation, not in original plan)** A minimal `RC_Channels` subclass. The vehicle has no receiver, but shared code (`AP_CRSF_Telem::queue_message`, reached from `GCS::send_text`) dereferences the `rc()` singleton unconditionally, so the object must exist or the process segfaults on the first status text. | `Blimp/RC_Channel_Blimp.*` |
 
@@ -402,6 +430,14 @@ GPS is **fitted and polled, but kept out of the flight control solution.**
 | **Enable/disable** | `GPS_TYPE` — standard, GCS-settable. `1` = auto-detect (default), `0` = off. |
 | **In the EKF?** | **No.** `EK3_SRC1_POSXY=0`, `EK3_SRC1_VELXY=0`, `EK3_SRC1_POSZ=1` (baro). |
 
+> ⚠️ **This exclusion was NOT actually in force until the EKF parameter group was
+> registered** (see the bug table). `EK3_*` parameters did not exist, so those three
+> lines in `rocket.parm` were silently discarded and the filter ran on defaults. If
+> you fork this vehicle, verify the settings you depend on actually *exist* — dump the
+> parameter list and grep for them — rather than trusting that a `.parm` line took.
+> The compass is separately excluded via `COMPASS_USE/2/3 = 0`; it is read only to
+> produce a display heading (see the heading section near the top).
+
 **Why it is excluded from control.** A GPS receiver loses lock under high-g boost and high
 dynamics — exactly the phase where control matters most. A dropout feeding the estimator
 mid-boost is far more dangerous than never trusting it. Attitude and climb rate (which
@@ -468,7 +504,8 @@ Things that look broken in the GCS but are correct:
 | What you see | Why |
 |---|---|
 | Throttle always 0 | Solid motor. There is no throttle. |
-| Heading/roll swinging ~166° | Euler singularity at nose-up. **Not a fault, not fixable** — see the heading section near the top. Watch `TILT` instead. |
+| Roll/pitch read as tilt, not body angles | `ATTITUDE` is reported in the rotated view, so the artificial horizon reads "am I vertical" rather than raw body Euler angles. Deliberate — see the heading section near the top. `ATTITUDE_QUATERNION` still carries true body attitude. |
+| Heading is steady and points north | Taken straight off the magnetometer, not the EKF (whose yaw is meaningless nose-up). Verified 357.3° against a 353° truth, 12° peak-to-peak. The compass is NOT in the flight solution (`COMPASS_USE=0`). |
 | `GLOBAL_POSITION_INT` lat/lon = 0 | No horizontal fix in the EKF, by design. **Its `relative_alt` IS valid** — verified −0.232 m on the pad. For *position*, read `GPS_RAW_INT`. |
 | Mode is a bare number 0–5 | `send_available_mode()` returns 0. PREP/FINCHECK/ARMED/BOOST/COAST/DESCENT. Any mode-change control does nothing: `set_mode()` refuses everything by design. |
 

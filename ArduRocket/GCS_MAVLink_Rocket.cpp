@@ -110,6 +110,182 @@ uint8_t GCS_MAVLINK_Rocket::send_available_mode(uint8_t index) const
 }
 
 /*
+  ATTITUDE, reported in the rotated view instead of the raw body frame.
+
+  THIS DELIBERATELY CHANGES WHAT ATTITUDE MEANS FOR THIS VEHICLE. Read this before
+  "fixing" it back.
+
+  The raw body frame of a nose-up rocket sits at pitch = 90 degrees, which is exactly
+  the Euler singularity: roll and yaw describe the same rotation and neither is
+  individually defined. A ground station therefore shows heading and roll swinging
+  through ~166 degrees while the airframe stands perfectly still -- measured at 0.086
+  degrees of actual tilt. That is not noise and no filter can fix it, because the
+  information is not in the signal.
+
+  The view (ROTATION_PITCH_90) is the frame the controller already flies in, where a
+  vertical rocket presents as LEVEL. Reporting it means:
+
+    roll, pitch  ->  tilt away from vertical, near zero on the rail
+
+  Both are far from the singularity and well conditioned, and they are what an
+  operator actually wants: the artificial horizon becomes "am I vertical".
+
+  Yaw is NOT taken from the view. Even in the view the EKF's yaw state is the same
+  badly-conditioned quantity, so it comes from the magnetometer instead -- see
+  rocket_heading_rad().
+
+  The cost is that ATTITUDE no longer means what the MAVLink spec says it means, so a
+  generic consumer will be misled. That is why ATTITUDE_QUATERNION is deliberately
+  left alone: it still carries the TRUE body attitude, so an honest ground-truth
+  channel always exists. If you need the raw body Euler angles, derive them from the
+  quaternion -- do not change this back without also solving the singularity.
+ */
+void GCS_MAVLINK_Rocket::send_attitude() const
+{
+    const AP_AHRS_View *view = rocket.ahrs_view;
+    if (view == nullptr) {
+        // no view yet (very early boot): the raw frame is all there is
+        GCS_MAVLINK::send_attitude();
+        return;
+    }
+
+    const Vector3f omega = view->get_gyro();
+    mavlink_msg_attitude_send(
+        chan,
+        AP_HAL::millis(),
+        view->roll,
+        view->pitch,
+        // Yaw comes from the MAGNETOMETER, not the EKF -- see rocket_heading_rad().
+        // The EKF's yaw is meaningless nose-up (it wandered 95.7 degrees while the
+        // vehicle sat still), so streaming it just spins the ground station's compass
+        // rose. Nothing on this vehicle consumes heading: the controller commands yaw
+        // RATE zero off the gyro, never a yaw angle. ATTITUDE_QUATERNION is left
+        // untouched and still carries the true body attitude as ground truth.
+        rocket_heading_rad(),
+        omega.x,
+        omega.y,
+        omega.z);
+}
+
+/*
+  Heading for the ground station, taken STRAIGHT OFF THE MAGNETOMETER.
+
+  This is deliberately independent of the EKF, and the compass is deliberately kept
+  out of the flight solution (COMPASS_USE=0 in rocket.parm). The split is the point:
+
+    the flight code    - never uses heading at all. Attitude hold works on tilt, and
+                         spin is held by commanding yaw RATE zero off the gyro.
+    the ground station - gets a real compass heading, because a spinning or frozen
+                         compass rose on the pad is useless to the crew.
+
+  Why not just report the EKF's yaw? Because it is meaningless on this airframe. The
+  EKF expresses yaw as "which compass direction is the nose pointing", and a rocket's
+  nose points at the sky, so that has no answer -- measured, it wandered 95.7 degrees
+  while the vehicle sat still. Raising it to 3-axis mag fusion (EK3_MAG_CAL=4) cut
+  that to 9.4 degrees but was rejected: 3-axis fusion assumes a magnetically stable
+  environment, and a steel motor casing plus igniter current is the opposite of that.
+
+  Computing it here sidesteps the whole problem: the field vector is rotated into the
+  VIEW frame, in which a vertical rocket reads as level, and then tilt-compensated
+  with the view's own matrix. The tilt correction is therefore small and well known,
+  and the result is the airframe's clocking about its long axis -- a quantity that is
+  genuinely observable from the field vector at any attitude.
+
+  Returns 0 if there is no healthy compass, which reads as north rather than as a
+  gap. Acceptable for a display-only value that nothing acts on.
+ */
+float GCS_MAVLINK_Rocket::rocket_heading_rad() const
+{
+    const Compass &compass = AP::compass();
+    if (!compass.available() || !compass.healthy() || rocket.ahrs_view == nullptr) {
+        return 0.0f;
+    }
+
+    /*
+      This repeats Compass::calculate_heading()'s tilt compensation rather than
+      calling it, because that helper pairs the field with the RAW body DCM and we
+      need the VIEW. Both must be in the same frame -- passing the view's matrix to
+      the helper mixes frames and produced a heading that swung 347 degrees.
+
+      So: rotate the field into the view frame first, then tilt-compensate with the
+      view's matrix. In the view a vertical rocket reads level, so the correction is
+      small and the result is the airframe's clocking about its long axis.
+     */
+    Vector3f field = compass.get_field();
+    field.rotate(ROTATION_PITCH_90);        // same rotation used to build ahrs_view
+
+    const Matrix3f &dcm = rocket.ahrs_view->get_rotation_body_to_ned();
+
+    // dcm.c is the gravity direction in the view frame, i.e. roll/pitch only
+    const float cos_pitch_sq = 1.0f - (dcm.c.x * dcm.c.x);
+    const float headY = field.y * dcm.c.z - field.z * dcm.c.y;
+    const float headX = field.x * cos_pitch_sq -
+                        dcm.c.x * (field.y * dcm.c.y + field.z * dcm.c.z);
+
+    const float heading = constrain_float(atan2f(-headY, headX), -M_PI, M_PI);
+    return wrap_PI(heading + compass.get_declination());
+}
+
+/*
+  GLOBAL_POSITION_INT with the heading field taken from the magnetometer.
+
+  Mirrors GCS_MAVLINK::send_global_position_int() exactly except for the final
+  argument, which upstream fills with ahrs.yaw_sensor. See send_attitude() for why
+  heading does not come from the EKF on this airframe.
+ */
+void GCS_MAVLINK_Rocket::send_global_position_int()
+{
+    AP_AHRS &ahrs = AP::ahrs();
+
+    // Upstream caches into its private global_position_current_loc, which a subclass
+    // cannot touch, so use a local copy. Location default-constructs to zeros, which
+    // matches upstream's behaviour of sending stale/empty data rather than nothing.
+    // There is no horizontal fix on this vehicle anyway (GPS is out of the EKF).
+    Location loc;
+    UNUSED_RESULT(ahrs.get_location(loc));
+
+    Vector3f vel;
+    if (!ahrs.get_velocity_NED(vel)) {
+        vel.zero();
+    }
+
+    mavlink_msg_global_position_int_send(
+        chan,
+        AP_HAL::millis(),
+        loc.lat,
+        loc.lng,
+        loc.alt * 10UL,     // same expression as GCS_MAVLINK::global_position_int_alt()
+        global_position_int_relative_alt(),
+        vel.x * 100,
+        vel.y * 100,
+        vel.z * 100,
+        // heading in centidegrees, from the magnetometer rather than the EKF
+        (uint16_t)(wrap_360(degrees(rocket_heading_rad())) * 100));
+}
+
+/*
+  VFR_HUD with the heading field taken from the magnetometer.
+
+  GCS_MAVLINK::send_vfr_hud() is NOT virtual, so it cannot be overridden the way
+  send_global_position_int() can. Instead try_send_message() routes MSG_VFR_HUD here.
+  This is the message QGroundControl actually drives its compass rose from, so
+  missing it was why pinning ATTITUDE alone changed nothing on screen.
+ */
+void GCS_MAVLINK_Rocket::send_vfr_hud_rocket()
+{
+    AP_AHRS &ahrs = AP::ahrs();
+
+    mavlink_msg_vfr_hud_send(
+        chan,
+        vfr_hud_airspeed(),
+        ahrs.groundspeed(),
+        (int16_t)wrap_360(degrees(rocket_heading_rad())),   // magnetometer heading, deg
+        abs(vfr_hud_throttle()),
+        vfr_hud_alt(),
+        vfr_hud_climbrate());
+}
+
+/*
   Vehicle-specific message sending.
 
   This override is load-bearing even though it handles a single message. The
@@ -134,6 +310,12 @@ bool GCS_MAVLINK_Rocket::try_send_message(enum ap_message id)
 {
     switch (id) {
 
+    case MSG_VFR_HUD:
+        // routed here only to replace the heading field; send_vfr_hud() is not virtual
+        CHECK_PAYLOAD_SIZE(VFR_HUD);
+        send_vfr_hud_rocket();
+        break;
+
     case MSG_WIND:
         /*
           Deliberately send nothing, following ArduSub and AntennaTracker.
@@ -151,6 +333,9 @@ bool GCS_MAVLINK_Rocket::try_send_message(enum ap_message id)
     default:
         return GCS_MAVLINK::try_send_message(id);
     }
+
+    // reached only by cases that break: the message was sent
+    return true;
 }
 
 MAV_RESULT GCS_MAVLINK_Rocket::handle_command_int_packet(const mavlink_command_int_t &packet,

@@ -53,6 +53,15 @@ public:
         k_param_serial_manager,
         k_param_arming,
 
+        // Attitude estimation. These MUST be registered in Parameters.cpp or their
+        // parameters silently do not exist -- AP_Vehicle does not register them for
+        // you, and a setting in a .parm file that matches no registered parameter is
+        // dropped without any error. AHRS_ORIENTATION and the EK3_SRC1_* settings
+        // that keep GPS out of the flight solution were both dead for exactly this
+        // reason.
+        k_param_compass,
+        k_param_ahrs,
+
         // Control
         k_param_motors = 30,
         k_param_attitude_control,

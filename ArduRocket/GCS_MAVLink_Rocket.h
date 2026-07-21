@@ -36,6 +36,19 @@ protected:
     // leaves to the vehicle. Omitting this is NOT harmless -- see the .cpp.
     bool try_send_message(enum ap_message id) override;
 
+    // Reports ATTITUDE in the ROTATED VIEW rather than the raw body frame, so the
+    // ground station stops sitting on the Euler singularity. Read the .cpp before
+    // touching this: it deliberately changes what ATTITUDE means for this vehicle.
+    void send_attitude() const override;
+
+    // Heading is published in THREE separate messages, all of which upstream fills
+    // from AHRS yaw. All three are redirected to rocket_heading_rad() below.
+    void send_global_position_int() override;
+    void send_vfr_hud_rocket();
+
+    // Heading for DISPLAY ONLY, read straight off the magnetometer. See the .cpp.
+    float rocket_heading_rad() const;
+
 private:
 
     uint8_t base_mode() const override;
