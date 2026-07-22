@@ -352,6 +352,37 @@ public:
     };
     GPSParms gps[AP_SIM_MAX_GPS_SENSORS];
 
+    /*
+      Rocket airframe geometry, for SIM_Rocket.
+
+      These are runtime parameters rather than compile-time constants because they
+      describe a PHYSICAL AIRFRAME that changes: fins get resized, tabs get cut
+      bigger, the CG moves when the payload changes. Rebuilding the simulator to
+      answer "what if the tabs were 30%?" is the wrong workflow.
+
+      SIM_RKT_TAB_CHORD and SIM_RKT_TAB_SPAN are the two least-known numbers in the
+      whole model -- they are assumed, not measured -- and control authority scales
+      linearly with both. They are first here on purpose.
+     */
+    class RocketParms {
+    public:
+        RocketParms(void) {
+            AP_Param::setup_object_defaults(this, var_info);
+        }
+        static const struct AP_Param::GroupInfo var_info[];
+
+        AP_Float tab_chord;    // control tab chord, as a fraction of fin chord
+        AP_Float tab_span;     // control tab span, as a fraction of fin span
+        AP_Float tab_max_deg;  // maximum tab deflection, degrees
+        AP_Float fin_root;     // fin root chord, m
+        AP_Float fin_tip;      // fin tip chord, m
+        AP_Float fin_semispan; // fin exposed semi-span, m
+        AP_Float body_radius;  // body tube radius, m
+        AP_Float fin_arm;      // fin centre of pressure behind the CG, m
+        AP_Float static_margin; // calibers of static margin (CP aft of CG)
+    };
+    RocketParms rocket;
+
 #if AP_SIM_VICON_ENABLED
     class ViconParms {
     public:

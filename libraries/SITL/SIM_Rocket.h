@@ -72,15 +72,60 @@ private:
     // ---- inertia ----
     // Slender body: hard to pitch/yaw, easy to spin. Estimated from mass and an
     // assumed ~1.5 m length (m*L^2/12); the export did not carry usable MOI columns.
-    float inertia_tilt = 1.80f;     // kg m^2 about body Y and Z
-    float inertia_spin = 0.015f;    // kg m^2 about body X (0.5*m*r^2, r=51mm)
+    // Both taken from the OpenRocket export's moment-of-inertia columns (lb ft^2
+    // converted to SI), NOT estimated. The same conversion reproduces the known
+    // 11.19 kg liftoff mass, which is what confirms the units.
+    //
+    // The previous values (1.80 / 0.015) came from ASSUMING a 1.5 m airframe. The
+    // .ork says it is 2.4448 m, and the inertia independently implies a 2.31 m
+    // equivalent rod -- so tilt inertia was understated by a factor of 2.8 and the
+    // rocket is far harder to turn than the model believed.
+    float inertia_tilt = 4.962f;    // kg m^2 about body Y and Z
+    float inertia_spin = 0.0208f;   // kg m^2 about body X
 
     // ---- aerodynamics ----
     // Moment produced per unit fin deflection per unit dynamic pressure [N m / Pa].
-    float fin_moment_gain = 0.0035f;
-    // Fin authority about the long axis is far weaker than about the tilt axes:
-    // spinning the airframe uses the fins edge-on.
-    float fin_spin_gain = 0.0008f;
+    /*
+      FIN GEOMETRY, not a mixing table.
+
+      The simulator is given four servo positions. It must NOT know how the flight
+      code combined roll/pitch/yaw into them -- that convention lives in exactly one
+      place, AP_FinMixerRocket. Here each fin is treated on its own: it has an angular
+      position around the body, it makes a force, and that force makes a moment about
+      the CG. The pair differences that look like "mixing" fall out of the geometry.
+
+      Keeping a copy of the mixer here is what caused a real bug: the sim averaged the
+      fin pair while using a per-fin gain, and so modelled HALF the tilt authority the
+      airframe has.
+
+      Each fin's lift acts TANGENTIALLY (perpendicular to the plane containing the
+      body axis and the fin), so for a fin at angle th its force f contributes
+          M_x -= f * fin_radius_m                 (spin, force at a radius)
+          M_y -= f * fin_arm_m * cos(th)
+          M_z -= f * fin_arm_m * sin(th)
+
+      Angles below are chosen to match the airframe's fin numbering (clockwise viewed
+      from the nose). Derived from the .ork geometry:
+        4 trapezoidal fins, root 305 mm, tip 102 mm, semi-span 102 mm, sweep 178 mm
+        -> area 0.0206 m^2, aspect ratio 1.00, CP 2.250 m from the nose
+        -> 678 mm behind the mid-burn CG, 92 mm out from the body axis
+     */
+    float fin_angle_deg[4] = { 270.0f, 180.0f, 90.0f, 0.0f };
+
+    /*
+      Derived from the SIM_RKT_* parameters in recompute_fin_geometry(), NOT
+      hardcoded. Three independent constants that could disagree with each other
+      have become one function of measurable dimensions -- change the tab size and
+      the force, arm and radius all move together.
+     */
+    float fin_force_gain;   // N per Pa per unit command, ONE fin
+    float fin_arm_m;        // fin CP behind the CG
+    float fin_radius_m;     // fin CP out from the body axis
+
+    // Recompute the above from the SIM_RKT_* geometry. Called at construction and
+    // whenever the parameters change, so the sim can be re-geometried at runtime.
+    void recompute_fin_geometry();
+    float last_geom_hash;   // cheap change detector for the parameters
     /*
       Pitch/yaw moment per radian of angle of attack per unit dynamic pressure
       [N m / (Pa rad)].
@@ -96,9 +141,32 @@ private:
         magnitude ~ Cn_alpha * A_ref * (x_cp - x_cg)
                   ~ 12 /rad * 0.0082 m^2 * 0.51 m
      */
-    float instability_gain = -0.050f;
-    float drag_area = 0.0045f;      // Cd(0.55) * A_ref(0.0082 m^2), subsonic
-    float rot_damping = 0.35f;      // aerodynamic rate damping [N m / (Pa rad/s)]
+    // 2 calibers of static margin, from the .ork design (fg.4.K-L.reversed).
+    //   |Ka| = CN_alpha * A_ref * (x_cp - x_cg) = 12.6 * 0.007707 * 0.198 = 0.0192
+    //
+    // NOTE the earlier -0.050 came from test.csv, an OLDER revision of the design
+    // that showed 3.87 calibers. Do not re-derive this from that CSV: it predates
+    // the .ork and describes a different airframe. Static margin drives control
+    // authority directly -- the tabs can hold Kf/|Ka| of angle of attack, which is
+    // 11.1 deg at 2 calibers versus only 5.7 deg at 3.87.
+    float instability_gain = -0.0192f;
+    /*
+      Axial drag as Cd * reference area [m^2].
+
+      Both numbers were previously wrong, in opposite directions, which is why the
+      total looked plausible: Cd was 0.55 and A_ref 0.0082 m^2. The export gives
+      Cd = 0.59 subsonic, 0.68 transonic, 0.69 supersonic -- never 0.55 -- and the
+      .ork body diameter of 3.90 in gives A_ref = 0.007707 m^2, not 0.0082.
+
+      0.65 is a single representative value across the boost and early coast, where
+      almost all the drag impulse is delivered. A Mach-varying Cd would be more
+      accurate still; this fixed value is why the modelled apogee runs high.
+     */
+    float drag_area = 0.00501f;     // Cd(0.65) * A_ref(0.007707 m^2)
+    // Aerodynamic rate damping, as M = rot_damping_coeff * V * omega [N m].
+    // NOTE this is proportional to V, not to q -- see the derivation in the .cpp.
+    // Computed from the fin geometry above: 0.5*rho*(4*S_fin)*CLa*arm^2.
+    float rot_damping_coeff = 0.0458f;   // N m / ((m/s) (rad/s))
 
     // Thrust curve, from the export. Linear interpolation between breakpoints.
     static constexpr uint8_t THRUST_PTS = 14;

@@ -111,6 +111,10 @@ const AP_Param::GroupInfo SIM::var_info[] = {
     // @Path: ./ServoModel.cpp
     AP_SUBGROUPINFO(servo, "SERVO_", 16, SIM, ServoParams),
 
+    // @Group: RKT_
+    // @Path: ./SITL.cpp
+    AP_SUBGROUPINFO(rocket, "RKT_", 43, SIM, SIM::RocketParms),
+
     AP_SUBGROUPEXTENSION("",      17, SIM,  var_sonar),
     // @Param: BATT_VOLTAGE
     // @DisplayName: Simulated battery resting voltage
@@ -1878,6 +1882,83 @@ OUT:
     // ::fprintf(stderr, "Distance @%f = %fm\n", angle, min_dist_cm*0.01f);
     return min_dist_cm * 0.01f;
 }
+
+/*
+  Rocket airframe geometry for SIM_Rocket.
+
+  Defaults are the Quattro airframe: read from its .ork design file, except the two
+  tab dimensions which are ASSUMED. Control authority scales linearly with tab chord,
+  tab span and maximum deflection, so those three are the numbers to change first
+  when the real tabs are measured.
+ */
+const AP_Param::GroupInfo SIM::RocketParms::var_info[] = {
+    // @Param: TAB_C
+    // @DisplayName: Control tab chord fraction
+    // @Description: Chord of the control tab as a fraction of the fin chord. ASSUMED, not measured. Drives the flap effectiveness, and so the steering authority, roughly linearly.
+    // @Range: 0.05 1.0
+    // @User: Advanced
+    AP_GROUPINFO("TAB_C", 1, RocketParms, tab_chord, 0.25),
+
+    // @Param: TAB_SPAN
+    // @DisplayName: Control tab span fraction
+    // @Description: Span of the control tab as a fraction of the fin semi-span. ASSUMED, not measured. Steering authority scales linearly with this.
+    // @Range: 0.1 1.0
+    // @User: Advanced
+    AP_GROUPINFO("TAB_SPAN", 2, RocketParms, tab_span, 0.75),
+
+    // @Param: TAB_MAX
+    // @DisplayName: Maximum tab deflection
+    // @Description: Tab deflection at full command, in degrees. Steering authority scales linearly with this.
+    // @Units: deg
+    // @Range: 5 45
+    // @User: Advanced
+    AP_GROUPINFO("TAB_MAX", 3, RocketParms, tab_max_deg, 20.0),
+
+    // @Param: FIN_ROOT
+    // @DisplayName: Fin root chord
+    // @Description: Fin root chord. From the .ork design file.
+    // @Units: m
+    // @User: Advanced
+    AP_GROUPINFO("FIN_ROOT", 4, RocketParms, fin_root, 0.3048),
+
+    // @Param: FIN_TIP
+    // @DisplayName: Fin tip chord
+    // @Description: Fin tip chord. From the .ork design file.
+    // @Units: m
+    // @User: Advanced
+    AP_GROUPINFO("FIN_TIP", 5, RocketParms, fin_tip, 0.1016),
+
+    // @Param: FIN_SPAN
+    // @DisplayName: Fin exposed semi-span
+    // @Description: Fin exposed semi-span, root to tip. From the .ork design file.
+    // @Units: m
+    // @User: Advanced
+    AP_GROUPINFO("FIN_SPAN", 6, RocketParms, fin_semispan, 0.1016),
+
+    // @Param: BODY_R
+    // @DisplayName: Body tube radius
+    // @Description: Body tube outer radius. Sets the fin interference factor and the radius at which fin forces act about the long axis.
+    // @Units: m
+    // @User: Advanced
+    AP_GROUPINFO("BODY_R", 7, RocketParms, body_radius, 0.04953),
+
+    // @Param: FIN_ARM
+    // @DisplayName: Fin CP behind CG
+    // @Description: Axial distance from the centre of gravity back to the fin centre of pressure. This is the lever arm the fins steer with, so it scales authority directly. Changes through the burn as the CG moves; this is the mid-burn value.
+    // @Units: m
+    // @User: Advanced
+    AP_GROUPINFO("FIN_ARM", 8, RocketParms, fin_arm, 0.6781),
+
+    // @Param: MARGIN
+    // @DisplayName: Static margin
+    // @Description: Calibers of static margin, i.e. how far the centre of pressure sits aft of the centre of gravity in body diameters. This is what the fins fight: the airframe weathercocks into the relative wind, and the maximum angle of attack the tabs can hold is roughly the tab authority divided by this.
+    // @Units: calibers
+    // @Range: 0.5 6
+    // @User: Advanced
+    AP_GROUPINFO("MARGIN", 9, RocketParms, static_margin, 2.0),
+
+    AP_GROUPEND
+};
 
 } // namespace SITL
 

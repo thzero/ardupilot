@@ -33,30 +33,28 @@ RKT_BURN_MS      100
 RKT_APOG_MS      500
 
 # --- Fin gain scheduling ----------------------------------------------------
-# MOT_Q_REF is the dynamic pressure at which the attitude gains are nominal; the
-# mixer scales fin deflection by MOT_Q_REF/q, bounded by MOT_GAIN_MAX.
+# The mixer scales fin deflection by min(MOT_Q_REF/q, MOT_GAIN_MAX). Because the
+# fin output still clips at +/-1, MOT_Q_REF effectively sets how much of the fins'
+# physically available authority the controller is allowed to use at speed.
 #
-# 142 Pa is derived from the rail-exit target, not picked arbitrarily:
+# 600 Pa was chosen by measurement, not derivation. Sweeping it against an 8 m/s
+# crosswind (worst tilt while the fins have real authority, i.e. above 25 m/s):
 #
-#   50 fps target  =  15.24 m/s
-#   q = 0.5 * rho * v^2 = 0.5 * 1.225 * 15.24^2 = 142 Pa
+#     MOT_Q_REF   142  ->  19.8 deg   fins only 10% travel: authority left unused
+#     MOT_Q_REF   600  ->  13.3 deg   fins 38% travel
+#     MOT_Q_REF  1200  ->  12.4 deg   but the 10-25 m/s band degrades to 30.8 deg
+#                                     and the fins approach saturation
 #
-# Setting Q_REF here makes the scheduling nominal (gain = 1.0) at rail exit -- the
-# lowest-authority moment of the flight, and therefore the condition the gains
-# should be tuned for. Above it the gain scales down, which is correct: at high q
-# the fins are very effective and need only small deflections.
-#
-# NOTE the earlier default of 600 Pa (~31 m/s) was a guess, and was actively wrong
-# here: it demanded a 4.22x boost at rail exit against a 4x cap, so the scheduling
-# sat clamped at exactly the moment it mattered most.
-#
-# If the gains end up tuned at some other flight condition, set Q_REF to THAT
-# condition's q.
-MOT_Q_REF        142
+# NOTE the earlier value of 142 was derived from the rail-exit dynamic pressure on
+# the theory that gains should be nominal at the lowest-authority moment. That is
+# sound for LOOP STABILITY but it throttles disturbance rejection everywhere above
+# rail exit, because the weathercock moment the fins fight grows with q while the
+# scheduled control moment stays constant.
+MOT_Q_REF        600
 
-# Upper bound on the low-q gain boost. With Q_REF at the rail-exit value this now
-# only engages BELOW the 50 fps target -- i.e. when the rocket is already slower
-# off the rail than it should be.
+# Upper bound on the low-q gain boost. This cannot create authority: the output
+# clips at +/-1 regardless, so the hard ceiling is Kf/|Ka| of angle of attack --
+# about 11 deg for this airframe at 2 calibers of static margin.
 MOT_GAIN_MAX     4
 
 # --- Attitude control -------------------------------------------------------

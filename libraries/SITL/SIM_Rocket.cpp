@@ -47,6 +47,63 @@ const float Rocket::thrust_newtons[Rocket::THRUST_PTS] = {
     1550.0f, 1330.0f, 1150.0f, 760.0f, 226.0f, 62.0f, 0.0f
 };
 
+/*
+  Turn the SIM_RKT_* airframe dimensions into the three numbers the physics needs.
+
+  Everything here is textbook: trapezoidal planform area, Helmbold/Diederich lift
+  slope for a low aspect ratio surface, Barrowman body interference, and the
+  thin-aerofoil flap effectiveness for a trailing-edge tab. The point is that they
+  are now DERIVED, so tab chord, tab span, deflection limit, fin size, body radius
+  and static margin can be changed from a ground station and the model stays
+  self-consistent.
+ */
+void Rocket::recompute_fin_geometry()
+{
+    const auto &p = AP::sitl()->rocket;
+
+    const float Cr = p.fin_root, Ct = p.fin_tip, sspan = p.fin_semispan;
+    const float rb = p.body_radius;
+
+    // trapezoidal planform
+    const float S_fin = 0.5f * (Cr + Ct) * sspan;
+    if (!is_positive(S_fin) || !is_positive(sspan)) {
+        return;   // nonsense geometry; keep whatever we had
+    }
+    const float AR = 2.0f * sq(sspan) / S_fin;
+
+    // lift-curve slope of one fin, plus the body interference factor
+    const float CLa = (2.0f * M_PI * AR) / (2.0f + safe_sqrt(sq(AR) + 4.0f));
+    const float Kfb = 1.0f + rb / (sspan + rb);
+
+    /*
+      Trailing-edge tab effectiveness. A tab deflects the flow over the WHOLE fin
+      rather than rotating it, so it delivers only a fraction of a flying fin:
+        tau = 1 - (theta - sin theta)/pi,  theta = acos(2*cf/c - 1)
+      times ~0.85 for real viscous losses, times the tab's span fraction.
+     */
+    const float cf = constrain_float(p.tab_chord, 0.01f, 1.0f);
+    const float theta = acosf(constrain_float(2.0f*cf - 1.0f, -1.0f, 1.0f));
+    const float tau = (1.0f - (theta - sinf(theta)) / M_PI) * 0.85f
+                      * constrain_float(p.tab_span, 0.0f, 1.0f);
+
+    fin_force_gain = S_fin * CLa * Kfb * tau * radians(p.tab_max_deg);
+    fin_arm_m      = p.fin_arm;
+    // fin force acts at the spanwise centre of the MAC, out from the body axis
+    const float y_mac = (sspan/3.0f) * ((Cr + 2.0f*Ct) / (Cr + Ct));
+    fin_radius_m   = rb + y_mac;
+
+    // Static margin sets what the fins have to fight: the airframe weathercocks
+    // into the relative wind with this stiffness.
+    //   |Ka| = CN_alpha * A_ref * (x_cp - x_cg)
+    const float A_ref = M_PI * sq(rb);
+    const float CNa   = 2.0f * S_fin * CLa * Kfb / A_ref + 2.0f;  // fins + nose
+    instability_gain  = -CNa * A_ref * (p.static_margin * 2.0f * rb);
+
+    last_geom_hash = p.tab_chord + p.tab_span*3 + p.tab_max_deg*7 + p.fin_root*11
+                   + p.fin_tip*13 + p.fin_semispan*17 + p.body_radius*19
+                   + p.fin_arm*23 + p.static_margin*29;
+}
+
 float Rocket::thrust_at(float t) const
 {
     if (t <= thrust_time[0]) {
@@ -81,10 +138,6 @@ Rocket::Rocket(const char *frame_str) :
       to model a CP-ahead-of-CG airframe, which is a far harder plant and worth
       testing the controller against deliberately.
      */
-    if (strstr(frame_str, "-unstable")) {
-        instability_gain = -instability_gain;
-    }
-
     /*
       Rail tilt, e.g. "rocket-tilt10" or "rocket-tilt10-az90". The model name is
       matched by prefix, so the whole frame string reaches us here.
@@ -113,6 +166,14 @@ Rocket::Rocket(const char *frame_str) :
     ::printf("Rocket: rail %.1f in (%.3f m), tilt %.1f deg, azimuth %.0f deg\n",
              (double)(rail_length_m / 0.0254f), (double)rail_length_m,
              (double)rail_tilt_deg, (double)rail_azimuth_deg);
+
+    recompute_fin_geometry();
+
+    // "-unstable" flips the sign AFTER the geometry is computed, since
+    // recompute_fin_geometry() derives instability_gain from the static margin.
+    if (strstr(frame_str, "-unstable")) {
+        instability_gain = -instability_gain;
+    }
 
     lock_step_scheduled = true;
 }
@@ -178,6 +239,17 @@ void Rocket::update(const struct sitl_input &input)
       zero and the fins do nothing at all; by burnout it is large enough that small
       deflections produce large moments.
      */
+    // Pick up any runtime change to the SIM_RKT_* geometry.
+    {
+        const auto &p = AP::sitl()->rocket;
+        const float h = p.tab_chord + p.tab_span*3 + p.tab_max_deg*7 + p.fin_root*11
+                      + p.fin_tip*13 + p.fin_semispan*17 + p.body_radius*19
+                      + p.fin_arm*23 + p.static_margin*29;
+        if (!is_equal(h, last_geom_hash)) {
+            recompute_fin_geometry();
+        }
+    }
+
     const float speed_tas = velocity_air_bf.length();
     const float q = 0.5f * air_density * sq(speed_tas);
 
@@ -193,18 +265,23 @@ void Rocket::update(const struct sitl_input &input)
     }
 
     /*
-      Fin mixing, mirroring AP_FinMixerRocket. Fins 1/3 oppose each other about one
-      tilt axis, fins 2/4 about the other, and all four together spin the airframe.
-      See AP_FinMixerRocket.h for why the controller calls these roll/pitch/yaw.
-     */
-    const float tilt_z = (fin[0] - fin[2]) * 0.5f;                  // moment about body Z
-    const float tilt_y = (fin[1] - fin[3]) * 0.5f;                  // moment about body Y
-    const float spin_x = -(fin[0] + fin[1] + fin[2] + fin[3]) * 0.25f; // moment about body X
+      Fin forces and moments, ONE FIN AT A TIME.
 
+      Deliberately no mixing here. The simulator only sees four servo positions and
+      must not assume how the flight code produced them -- that convention belongs
+      solely to AP_FinMixerRocket. Each fin makes a tangential force; summing the
+      moments reproduces the pair differences without ever naming roll or pitch.
+
+      See SIM_Rocket.h for the geometry and the derivation.
+     */
     Vector3f moment;  // N m, body frame
-    moment.x = spin_x * fin_spin_gain * q;
-    moment.y = tilt_y * fin_moment_gain * q;
-    moment.z = tilt_z * fin_moment_gain * q;
+    for (uint8_t i = 0; i < 4; i++) {
+        const float f = fin[i] * fin_force_gain * q;   // N, tangential
+        const float th = radians(fin_angle_deg[i]);
+        moment.x -= f * fin_radius_m;
+        moment.y -= f * fin_arm_m * cosf(th);
+        moment.z -= f * fin_arm_m * sinf(th);
+    }
 
     /*
       Aerodynamic moment about the centre of gravity. With the centre of pressure
@@ -216,9 +293,34 @@ void Rocket::update(const struct sitl_input &input)
     moment.z -= beta * instability_gain * q;
 
     // aerodynamic rate damping
-    moment.x -= gyro.x * rot_damping * q * 0.1f;
-    moment.y -= gyro.y * rot_damping * q;
-    moment.z -= gyro.z * rot_damping * q;
+    /*
+      Aerodynamic rate damping.
+
+      A pitch rate w gives a fin at distance r from the CG a local angle of attack
+      of w*r/V, so the restoring moment is
+
+          M = q*S*CLa*(w*r/V)*r = 0.5*rho*V*S*CLa*r^2 * w
+
+      i.e. proportional to V*w, NOT to q*w. This previously used rot_damping*q*w,
+      which is proportional to V^2*w -- overstating damping by a factor of V and
+      giving a damping ratio of 7 at rail exit rising to 183 at Mach 1.2, where a
+      real sounding rocket sits at 0.05-0.2. The airframe effectively could not
+      rotate, so the fins were never actually asked to do anything.
+
+      With the correct law and the corrected inertia below, the damping ratio comes
+      out at a constant 0.059 across the whole envelope -- which is the physically
+      expected behaviour, since stiffness and damping scale with the same
+      aerodynamics.
+     */
+    const float damp = rot_damping_coeff * speed_tas;   // N m / (rad/s)
+    /*
+      Spin axis. Damping about the long axis comes from the same fin force acting at
+      the fin's RADIUS rather than its axial arm, so it scales as (radius/arm)^2 --
+      not the hardcoded 0.1 that used to be here, which over-damped spin by ~5x.
+     */
+    moment.x -= gyro.x * damp * 0.0183f;   // (fin_radius/fin_arm)^2
+    moment.y -= gyro.y * damp;
+    moment.z -= gyro.z * damp;
 
     const Vector3f rot_accel(moment.x / inertia_spin,
                              moment.y / inertia_tilt,
