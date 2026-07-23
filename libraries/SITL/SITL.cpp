@@ -1957,6 +1957,82 @@ const AP_Param::GroupInfo SIM::RocketParms::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("MARGIN", 9, RocketParms, static_margin, 2.0),
 
+    // @Param: DRYMASS
+    // @DisplayName: Burnt-out mass
+    // @Description: Airframe mass with the motor burnt out. From the OpenRocket CSV (mass column at end of burn).
+    // @Units: kg
+    // @User: Advanced
+    AP_GROUPINFO("DRYMASS", 10, RocketParms, dry_mass, 8.47),
+
+    // @Param: PRPMASS
+    // @DisplayName: Propellant mass
+    // @Description: Propellant consumed over the burn. Liftoff mass = DRYMASS + PRPMASS.
+    // @Units: kg
+    // @User: Advanced
+    AP_GROUPINFO("PRPMASS", 11, RocketParms, prop_mass, 2.72),
+
+    // @Param: IMPULSE
+    // @DisplayName: Total impulse
+    // @Description: Total impulse of the motor. Mass depletes against impulse delivered, not time.
+    // @Units: N.s
+    // @User: Advanced
+    AP_GROUPINFO("IMPULSE", 12, RocketParms, impulse, 5414.0),
+
+    // @Param: BRNTIME
+    // @DisplayName: Burn time
+    // @Description: Time from ignition to zero thrust.
+    // @Units: s
+    // @User: Advanced
+    AP_GROUPINFO("BRNTIME", 13, RocketParms, burn_time, 4.70),
+
+    // @Param: IGNDLY
+    // @DisplayName: Ignition delay
+    // @Description: Seconds after arming before the motor lights. A test convenience standing in for the ground launch controller; not a real vehicle parameter.
+    // @Units: s
+    // @User: Advanced
+    AP_GROUPINFO("IGNDLY", 14, RocketParms, ign_delay, 3.0),
+
+    // @Param: JTILT0
+    // @DisplayName: Tilt inertia, loaded
+    // @Description: Moment of inertia about body Y/Z at liftoff (fully loaded). From the OpenRocket CSV longitudinal-MOI column, first row.
+    // @Units: kg.m.m
+    // @User: Advanced
+    AP_GROUPINFO("JTILT0", 15, RocketParms, j_tilt_loaded, 4.962),
+
+    // @Param: JTILT1
+    // @DisplayName: Tilt inertia, burnt
+    // @Description: Moment of inertia about body Y/Z burnt out. From the OpenRocket CSV, last powered row. Interpolated with JTILT0 on burn fraction.
+    // @Units: kg.m.m
+    // @User: Advanced
+    AP_GROUPINFO("JTILT1", 16, RocketParms, j_tilt_burnt, 4.170),
+
+    // @Param: JSPIN0
+    // @DisplayName: Spin inertia, loaded
+    // @Description: Moment of inertia about the long axis at liftoff. From the OpenRocket CSV rotational-MOI column, first row.
+    // @Units: kg.m.m
+    // @User: Advanced
+    AP_GROUPINFO("JSPIN0", 17, RocketParms, j_spin_loaded, 0.0208),
+
+    // @Param: JSPIN1
+    // @DisplayName: Spin inertia, burnt
+    // @Description: Moment of inertia about the long axis burnt out. Interpolated with JSPIN0 on burn fraction.
+    // @Units: kg.m.m
+    // @User: Advanced
+    AP_GROUPINFO("JSPIN1", 18, RocketParms, j_spin_burnt, 0.0189),
+
+    // @Param: DRAGA
+    // @DisplayName: Drag area
+    // @Description: Cd times reference area. A single representative value; the real Cd varies with Mach. This is why the modelled apogee runs slightly high.
+    // @Units: m.m
+    // @User: Advanced
+    AP_GROUPINFO("DRAGA", 19, RocketParms, drag_area, 0.005376),
+
+    // @Param: ROTDAMP
+    // @DisplayName: Rate damping coefficient
+    // @Description: Aerodynamic rate damping. The moment is ROTDAMP * airspeed * body-rate. Derived from the fin geometry; see SIM_Rocket.cpp.
+    // @User: Advanced
+    AP_GROUPINFO("ROTDAMP", 20, RocketParms, rot_damping, 0.0458),
+
     AP_GROUPEND
 };
 

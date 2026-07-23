@@ -64,24 +64,9 @@ private:
       Summary of the modelled vehicle: ~11.2 kg off the pad, M-class motor
       (~5400 N.s total impulse), 4.02 in diameter, Mach 1.2, ~3900 m apogee.
      */
-    float dry_mass = 8.47f;         // kg, burnt out
-    float propellant_mass = 2.72f;  // kg actually consumed (11.19 -> 8.47)
-    float burn_time = 4.70f;        // s to zero thrust
-    float ignition_delay = 3.0f;    // s after arming, i.e. the launch controller
-
-    // ---- inertia ----
-    // Slender body: hard to pitch/yaw, easy to spin. Estimated from mass and an
-    // assumed ~1.5 m length (m*L^2/12); the export did not carry usable MOI columns.
-    // Both taken from the OpenRocket export's moment-of-inertia columns (lb ft^2
-    // converted to SI), NOT estimated. The same conversion reproduces the known
-    // 11.19 kg liftoff mass, which is what confirms the units.
-    //
-    // The previous values (1.80 / 0.015) came from ASSUMING a 1.5 m airframe. The
-    // .ork says it is 2.4448 m, and the inertia independently implies a 2.31 m
-    // equivalent rod -- so tilt inertia was understated by a factor of 2.8 and the
-    // rocket is far harder to turn than the model believed.
-    float inertia_tilt = 4.962f;    // kg m^2 about body Y and Z
-    float inertia_spin = 0.0208f;   // kg m^2 about body X
+    // Mass, motor and inertia are now runtime parameters -- see SIM_RKT_* in
+    // SITL.cpp. A new rocket has a new motor and a new airframe, so none of these
+    // are compile-time constants any more; SIM_Rocket.cpp reads them each step.
 
     // ---- aerodynamics ----
     // Moment produced per unit fin deflection per unit dynamic pressure [N m / Pa].
@@ -156,17 +141,15 @@ private:
       Both numbers were previously wrong, in opposite directions, which is why the
       total looked plausible: Cd was 0.55 and A_ref 0.0082 m^2. The export gives
       Cd = 0.59 subsonic, 0.68 transonic, 0.69 supersonic -- never 0.55 -- and the
-      .ork body diameter of 3.90 in gives A_ref = 0.007707 m^2, not 0.0082.
-
-      0.65 is a single representative value across the boost and early coast, where
-      almost all the drag impulse is delivered. A Mach-varying Cd would be more
-      accurate still; this fixed value is why the modelled apogee runs high.
+      NOTE Cd and A_ref must be a consistent pair. OpenRocket normalises its Cd
+      against its OWN reference diameter (4.02 in, CSV col53 -> A_ref 0.008189 m^2),
+      NOT the 3.90 in body tube. The default SIM_RKT_DRAGA = 0.005376 is Cd(0.656) x
+      that reference area. A Mach-varying Cd would be more accurate; this fixed value
+      is why the modelled apogee runs slightly high.
      */
-    float drag_area = 0.00501f;     // Cd(0.65) * A_ref(0.007707 m^2)
-    // Aerodynamic rate damping, as M = rot_damping_coeff * V * omega [N m].
-    // NOTE this is proportional to V, not to q -- see the derivation in the .cpp.
-    // Computed from the fin geometry above: 0.5*rho*(4*S_fin)*CLa*arm^2.
-    float rot_damping_coeff = 0.0458f;   // N m / ((m/s) (rad/s))
+    // Drag area (Cd*A_ref) and rate damping are runtime parameters -- SIM_RKT_DRAGA
+    // and SIM_RKT_ROTDAMP. Rate damping is M = ROTDAMP * V * omega, proportional to
+    // V not q; see the derivation in the .cpp.
 
     // Thrust curve, from the export. Linear interpolation between breakpoints.
     static constexpr uint8_t THRUST_PTS = 14;
@@ -174,8 +157,8 @@ private:
     static const float thrust_newtons[THRUST_PTS];
     float thrust_at(float t) const;
 
-    // Total impulse of the curve above, ~M-class. Mass depletes against this.
-    static constexpr float TOTAL_IMPULSE_NS = 5414.0f;
+    // Mass depletes against total impulse (SIM_RKT_IMPULSE), not the integral of the
+    // curve, so editing breakpoints cannot silently change the burnt mass.
     float impulse_used = 0.0f;
 
     /*

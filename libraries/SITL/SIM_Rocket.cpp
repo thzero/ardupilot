@@ -125,7 +125,8 @@ Rocket::Rocket(const char *frame_str) :
     burn_elapsed(0.0f),
     ignited(false)
 {
-    mass = dry_mass + propellant_mass;
+    const auto &rp = AP::sitl()->rocket;
+    mass = rp.dry_mass + rp.prop_mass;
 
     // A rocket sits nose-up on its rail. The base class already knows how to keep
     // a vertical airframe standing on the ground.
@@ -183,6 +184,7 @@ void Rocket::update(const struct sitl_input &input)
     update_wind(input);
 
     const float delta_time = frame_time_us * 1.0e-6f;
+    const auto &rkt = AP::sitl()->rocket;
 
     /*
       Fin commands. The vehicle maps fins to the first four outputs at +/-4500,
@@ -203,7 +205,7 @@ void Rocket::update(const struct sitl_input &input)
         if (arm_time_ms == 0) {
             arm_time_ms = AP_HAL::millis();
         }
-        if (!ignited && (AP_HAL::millis() - arm_time_ms) > (uint32_t)(ignition_delay * 1000)) {
+        if (!ignited && (AP_HAL::millis() - arm_time_ms) > (uint32_t)(rkt.ign_delay * 1000)) {
             ignited = true;
             ::printf("Rocket: ignition\n");
         }
@@ -215,10 +217,10 @@ void Rocket::update(const struct sitl_input &input)
     }
 
     float thrust = 0.0f;
-    if (ignited && burn_elapsed < burn_time) {
+    if (ignited && burn_elapsed < rkt.burn_time) {
         thrust = thrust_at(burn_elapsed);
         burn_elapsed += delta_time;
-        if (burn_elapsed >= burn_time) {
+        if (burn_elapsed >= rkt.burn_time) {
             ::printf("Rocket: burnout\n");
         }
     }
@@ -231,8 +233,18 @@ void Rocket::update(const struct sitl_input &input)
       distorts acceleration exactly where launch detection reads it.
      */
     impulse_used += thrust * delta_time;
-    const float burn_frac = constrain_float(impulse_used / TOTAL_IMPULSE_NS, 0.0f, 1.0f);
-    mass = dry_mass + propellant_mass * (1.0f - burn_frac);
+    const float burn_frac = constrain_float(impulse_used / rkt.impulse, 0.0f, 1.0f);
+    mass = rkt.dry_mass + rkt.prop_mass * (1.0f - burn_frac);
+
+    /*
+      Inertia is NOT constant: it drops ~16% as propellant burns. Interpolate the
+      loaded and burnt-out values (both exported by OpenRocket) on the same burn
+      fraction the mass uses, rather than pinning it at the loaded value.
+     */
+    const float inertia_tilt = linear_interpolate(rkt.j_tilt_loaded, rkt.j_tilt_burnt,
+                                                  burn_frac, 0.0f, 1.0f);
+    const float inertia_spin = linear_interpolate(rkt.j_spin_loaded, rkt.j_spin_burnt,
+                                                  burn_frac, 0.0f, 1.0f);
 
     /*
       Dynamic pressure is the whole story for control authority. On the pad it is
@@ -312,7 +324,7 @@ void Rocket::update(const struct sitl_input &input)
       expected behaviour, since stiffness and damping scale with the same
       aerodynamics.
      */
-    const float damp = rot_damping_coeff * speed_tas;   // N m / (rad/s)
+    const float damp = rkt.rot_damping * speed_tas;   // N m / (rad/s)
     /*
       Spin axis. Damping about the long axis comes from the same fin force acting at
       the fin's RADIUS rather than its axial arm, so it scales as (radius/arm)^2 --
@@ -329,7 +341,7 @@ void Rocket::update(const struct sitl_input &input)
     // Axial drag, opposing motion through the air.
     Vector3f drag_bf;
     if (speed_tas > 0.1f) {
-        drag_bf = -velocity_air_bf.normalized() * (q * drag_area);
+        drag_bf = -velocity_air_bf.normalized() * (q * rkt.drag_area);
     }
 
     // Thrust acts along the airframe's long axis, which is body X (the nose).

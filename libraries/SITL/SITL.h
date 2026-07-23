@@ -380,6 +380,23 @@ public:
         AP_Float body_radius;  // body tube radius, m
         AP_Float fin_arm;      // fin centre of pressure behind the CG, m
         AP_Float static_margin; // calibers of static margin (CP aft of CG)
+
+        // Motor and mass. A new rocket = a new motor (they are not shared), so
+        // all of these are per-rocket.
+        AP_Float dry_mass;      // burnt-out mass, kg
+        AP_Float prop_mass;     // propellant consumed, kg
+        AP_Float impulse;       // total impulse, N.s
+        AP_Float burn_time;     // s to zero thrust
+        AP_Float ign_delay;     // ignition delay after arming, s (test convenience)
+
+        // Inertia, as a LOADED / BURNT-OUT pair, interpolated on burn fraction.
+        // The single-value approximation was 16% off by burnout; OpenRocket exports
+        // both ends, so there is no reason to throw that away.
+        AP_Float j_tilt_loaded, j_tilt_burnt;   // kg m^2 about body Y/Z
+        AP_Float j_spin_loaded, j_spin_burnt;   // kg m^2 about body X
+
+        AP_Float drag_area;     // Cd * A_ref, m^2
+        AP_Float rot_damping;   // rate damping coeff, N m / ((m/s)(rad/s))
     };
     RocketParms rocket;
 

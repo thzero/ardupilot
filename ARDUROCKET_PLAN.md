@@ -16,9 +16,18 @@
 > apogee followed by auto-disarm. ArduPlane still builds clean with QROCKET removed.
 >
 > **NOT verified — required before any real motor:**
-> - **Gains are placeholders, never tuned.** Coast deflection hit ~400us, which is
->   ~80% of full fin travel — near saturation. Tune `MOT_Q_REF` / `MOT_GAIN_MAX`
->   and the `ATC_*` gains in SITL first.
+> - **`ATC_*` gains are the day-one placeholders, never tuned.** `MOT_Q_REF` has been
+>   tuned (600, by measurement — see §9), but the attitude gains have not. NOTE the
+>   plant they must be tuned against was corrected substantially (inertia, damping,
+>   drag, fin authority — §9); any gain work predating that is void.
+> - **Wind-limited, not gain-limited, near apogee.** At the 20 mph operational ceiling
+>   the airframe reaches ~15 deg off vertical late in coast because the tabs cannot
+>   out-muscle the wind at low q, not because the controller is failing. In calm air
+>   it holds within ~0.3 deg. This is a static-margin/tab-authority limit, not a
+>   tuning one; see §9's MOT_Q_REF sweep.
+> - **Control tab dimensions are ASSUMED** (25% chord, 75% span, 20 deg). They set fin
+>   authority linearly and are not in either OpenRocket file. Measure and set the real
+>   values (`SIM_RKT_TAB_*`).
 > - **`ARMING_SKIPCHK -1`** in the defaults is a SITL bring-up shortcut. Use
 >   `21064` for real flight (see `Tools/autotest/default_params/rocket.parm`).
 > - **FIN DIRECTION IS NOT VERIFIED BY SOFTWARE — IT CANNOT BE.** The pre-arm fin
@@ -681,69 +690,133 @@ failsafe surface. Git history retains it.
 
 ## 9. `SIM_Rocket` (`libraries/SITL/SIM_Rocket.{h,cpp}`)
 
-**There is no SITL rocket model** — closest is `SIM_SingleCopter.cpp`. This is the largest novel item
-and the only realistic tuning surface: a burn is ~2 s and you get one shot per motor.
+The SITL plant. `class Rocket : public Aircraft`. Models a thrust curve with burnout,
+mass depletion by impulse, altitude-varying air density (from the base class), fin
+forces summed per-fin, aerodynamic stability, rate damping, and the launch rail.
 
-`class Rocket : public Aircraft`, ~250 lines, modeling: thrust curve with **burnout** (mandatory to
-exercise `COAST`), fin force ∝ q (**zero at liftoff** — the defining characteristic), mass depletion,
-and **CP-ahead-of-CG aerodynamic instability** — the tilt plant is open-loop unstable, unlike every
-existing SITL model. Ignition is a ground launch controller: the motor fires a fixed delay after arming,
-because ArduPilot does not control the igniter. Use the base class's `GROUND_BEHAVIOR_TAILSITTER` for a
-vehicle that stands nose-up on the pad.
+> **This section was substantially rewritten. The model as first built was wrong in
+> several ways that all flattered the controller; every one was found by measurement,
+> not review. If you are reading the git history, do not trust the original numbers.**
+
+### The airframe is a parameter set, not hardcoded constants
+
+Everything that describes the airframe is a runtime `SIM_RKT_*` parameter (SITL.cpp),
+so a different rocket is a different `.parm` file with no rebuild. A new **motor**
+still needs a rebuild (the thrust curve stays a compile-time array) — an accepted
+limit, since motors are not shared between airframes here.
+
+| group | params |
+|---|---|
+| geometry | `FIN_ROOT FIN_TIP FIN_SPAN BODY_R FIN_ARM TAB_C TAB_SPAN TAB_MAX MARGIN` |
+| mass / motor | `DRYMASS PRPMASS IMPULSE BRNTIME IGNDLY` |
+| inertia | `JTILT0/JTILT1 JSPIN0/JSPIN1` (loaded/burnt pair, interpolated on burn fraction) |
+| aero | `DRAGA ROTDAMP` |
+
+The fin **force**, **arm**, **radius** and **stability** are DERIVED from the geometry
+in `recompute_fin_geometry()`, not stored — change a tab dimension and all four move
+together. Runtime edits are picked up via a change hash.
+
+### Fin forces are summed per-fin — no mixing in the sim
+
+The sim sees four servo positions and treats each fin independently: a tangential
+force at its angular position, `M = p x F`. The pair differences fall out of the
+geometry. The sim therefore does NOT encode `AP_FinMixerRocket`'s roll/pitch/yaw
+convention — that lives in exactly one place. An earlier version DID copy the mixer
+here, and averaged the pair while using a per-fin gain, modelling **half** the tilt
+authority; the per-fin form makes that class of bug impossible.
+
+### The airframe is passively STABLE
+
+`instability_gain` is negative (CP aft of CG). The real Quattro is ~2 calibers stable.
+`rocket-unstable` flips the sign to model a CP-ahead-of-CG airframe for adversarial
+testing. NOTE the original model had this backwards (unstable by default) AND used a
+stale 3.87-caliber figure from an older CSV export; both corrected.
+
+### Numbers that were wrong, and how they were caught
+
+| was | is | how found |
+|---|---|---|
+| `inertia_tilt` 1.80 (assumed 1.5 m airframe) | 4.96 (CSV MOI column) | 2.8x error; the .ork says 2.44 m |
+| `rot_damping` 0.35, law `q*omega` | 0.0458, law `V*omega` | damping ratio was 7-183; real is 0.05-0.2 |
+| spin damping factor 0.1 (invented) | 0.0183 = (r/arm)^2 | over-damped spin 5x |
+| `drag_area` Cd 0.55 x tube A_ref | Cd 0.656 x OR reference A_ref | Cd/A_ref must be a consistent pair; ~7% low |
+| fixed sea-level density | ISA vs altitude | 1.48x too dense at apogee |
+
+### Validated against OpenRocket
+
+Flown zero-wind and compared to the export (an independent implementation of the same
+airframe): **max velocity within 1.4%, peak thrust/mass exact, apogee +3.7%** (the
+apogee margin is the single fixed Cd vs the real transonic rise). See
+`scratchpad/validate_trajectory.py`.
 
 ### The launch rail is modelled, and matters
 
-Until the airframe has travelled `rail_length_m` from ignition, the rail holds its attitude
-and constrains it to slide along the rail line. Applied **after** `update_dynamics()`, so it
-overrides the base class's tailsitter ground handling (which otherwise forces the airframe
-perfectly upright and silently ignores any configured tilt).
+Until the airframe has travelled `rail_length_m` from ignition, the rail holds attitude
+and constrains motion to the rail line. Applied AFTER `update_dynamics()`, overriding
+the base class tailsitter ground handling. It covers exactly the phase where q is near
+zero and the fins have no authority. Default 72 in (1.8288 m). Rail exit target is
+50 fps (15.24 m/s), per NAR/Tripoli.
 
-This is not cosmetic. It covers exactly the phase where dynamic pressure is near zero and
-the fins have no authority; without it the sim lets an unstable airframe topple at t=0 in a
-way a real rail simply prevents.
+### Gain scheduling reference — MOT_Q_REF = 600, by measurement
 
-**Default rail length is 72 in (1.8288 m)** — the rail this project launches from.
+`MOT_Q_REF` sets the maximum control moment the mixer will command, because the fin
+output clips at +/-1. It was swept against an 8 m/s crosswind:
 
-The sim prints, and flags against the target:
+| MOT_Q_REF | worst tilt (>25 m/s) | note |
+|---|---|---|
+| 142 (rail-exit q) | 19.8 deg | fins at 10% travel — authority left unused |
+| **600** | **13-16 deg** | fins at 38% |
+| 1200 | 12.4 deg | but low-speed band degrades and fins near saturation |
 
-```
-Rocket: off the rail at 15.2 m/s (50 fps), q=142 Pa
-Rocket: off the rail at 11.0 m/s (36 fps), q=74 Pa   *** BELOW 50 fps TARGET ***
-```
+NOTE the earlier text here argued for 142 on the theory that gains should be nominal
+at the lowest-authority moment. That is sound for loop STABILITY but throttles
+disturbance rejection everywhere above rail exit, because the weathercock moment grows
+with q while the scheduled control moment is held constant. 600 is the measured balance.
 
-**Rail exit is the most consequential number for a fin-steered rocket.** Fin authority
-scales with dynamic pressure, so exit speed sets how much control exists at the instant the
-rail stops holding the airframe — the lowest-authority moment of the flight. Below target
-the rocket is relying on passive stability it does not have (CP is ahead of CG here), and
-the fins cannot save it. **Target is 50 fps (15.24 m/s)**, per NAR/Tripoli practice.
-
-### This sets the gain scheduling reference
-
-The rail-exit condition is what `MOT_Q_REF` should be derived from:
-
-```
-50 fps = 15.24 m/s   ->   q = 0.5 * 1.225 * 15.24^2 = 142 Pa
-```
-
-`MOT_Q_REF = 142` makes the fin gains nominal (scale = 1.0) exactly at rail exit, so the
-gains are tuned for the worst case and scale *down* as the rocket accelerates — correct,
-since at high q small deflections suffice.
-
-The original 600 Pa default was a guess (≈31 m/s) and was actively wrong: it demanded a
-4.22× boost at rail exit against a 4× `MOT_GAIN_MAX`, leaving the scheduling **clamped at
-precisely the moment it mattered most**. With `Q_REF` at the rail-exit value, `GAIN_MAX`
-now only engages *below* target — i.e. when the rocket is already leaving the rail slower
-than it should.
-
-Frame strings select the geometry (matched by prefix, so the whole string reaches the model):
+### Frame strings
 
 | Frame | Meaning |
 |---|---|
-| `rocket` | 72 in rail, vertical |
-| `rocket-stable` | CP behind CG — passively stable, for isolating controller bugs |
-| `rocket-tilt10` | 10° off vertical (NAR/Tripoli cap is 20°) |
-| `rocket-tilt10-az90` | 10°, leaning toward 90° azimuth |
-| `rocket-tilt10-rail48` | 10°, on a 48 in rail |
+| `rocket` | 72 in rail, vertical, stable |
+| `rocket-unstable` | CP ahead of CG — the hard plant, for adversarial testing |
+| `rocket-tilt10` | 10 deg off vertical (NAR/Tripoli cap is 20) |
+| `rocket-tilt10-az90` | 10 deg, leaning toward 90 deg azimuth |
+| `rocket-tilt10-rail48` | 10 deg, on a 48 in rail |
+
+## 9b. MATLAB plant, and the C++/MATLAB split
+
+`Tools/ArduRocket/matlab/` is a second plant that drives the SAME ArduPilot flight code
+through the **JSON external-simulator backend** (`--model JSON`): MATLAB owns the
+physics, ArduPilot runs unmodified, closed over UDP. See `run_gcs`/`rocket_sim.m` and
+the README there for the protocol gotchas (reply to the sender port, newline-wrapped
+JSON, specific-force accelerometer convention).
+
+Two independent plants is deliberate — disagreements between them have caught real bugs
+(the fin-authority 2x, an inverted initial attitude). But they must be kept identical
+where they overlap: both use the per-fin summation, the same density model, and the
+SAME fin-geometry derivation.
+
+`rocket_selftest.m` checks the hand-written quaternion and atmosphere maths against
+known answers (18 assertions, all also verified in Python). It found the inverted
+attitude bug on first run. Run it whenever the MATLAB maths changes.
+
+## 9c. Adding a new rocket — `Tools/ArduRocket/ork_to_rocket.py`
+
+A rocket needs BOTH OpenRocket exports, because neither alone is sufficient:
+- the `.ork` has fin geometry and component masses but NOT inertia (OpenRocket computes
+  inertia at runtime and does not store it);
+- the CSV export has the computed inertia, mass and trajectory but NOT fin geometry.
+
+```
+python3 Tools/ArduRocket/ork_to_rocket.py DESIGN.ork FLIGHT.csv --name NAME
+```
+
+emits `NAME.parm` (SITL) and `NAME_params.m` (MATLAB), running the same fin-geometry
+derivation as the C++ so both sims agree. It deliberately does NOT guess what it cannot
+know — control-tab dimensions, fin arm and static margin are left at defaults and
+flagged **SET BY HAND** (re-run after editing so the derived force/stability update).
+This script exists because hand transcription is exactly where the errors above came
+from; it makes the extraction deterministic and repeatable.
 
 ## 10. Verification
 

@@ -72,7 +72,10 @@ P.rot_damping_coeff = 0.0458;  % N m / ((m/s) (rad/s))
 % directions (Cd 0.55, A_ref 0.0082) so the total looked plausible. The export gives
 % Cd = 0.59 subsonic, 0.68 transonic, 0.69 supersonic; the .ork diameter gives
 % A_ref = 0.007707 m^2. 0.65 is representative across boost and early coast.
-P.drag_area       = 0.00501;  % Cd(0.65) * A_ref(0.007707)
+% Cd and A_ref must be a CONSISTENT pair: OpenRocket normalises its Cd against
+% its own reference diameter (4.02 in, CSV col53), NOT the 3.90 in body tube. Using
+% the tube area here (the old 0.00501) mixed the two and understated drag ~7%.
+P.drag_area       = 0.005376; % Cd(0.656) * A_ref(0.008189, from OR ref diameter)
 
 % ---- launch rail ----
 P.rail_length   = 1.8288;   % 72 in
