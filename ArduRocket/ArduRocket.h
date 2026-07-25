@@ -126,33 +126,41 @@ private:
       the mixer output against measured attitude is circular. So instead of
       pretending to check it, the vehicle makes the human check unskippable.
 
-      First ARM of a power cycle runs a known wiggle sequence -- one fin at a time,
-      announced -- and does NOT arm. The operator watches, then sends ARM again to
-      confirm what they saw. Only then does the vehicle arm. Latched for the power
-      cycle so a scrubbed countdown does not force a repeat, and cleared by reboot.
-     */
-    bool     fin_check_done;         // confirmed this power cycle
-    bool     fin_check_awaiting;     // sequence finished, waiting for the operator
-    uint32_t fin_check_start_ms;     // 0 when the sequence is not running
+      OPERATOR FLOW (GCS-native, single-press arm):
+        1. On the rail, the operator triggers the fin check (a ground-station
+           button -> MAV_CMD_DO_AUX_FUNCTION; see GCS_MAVLink_Rocket.cpp). The
+           vehicle runs a known wiggle -- one fin at a time, announced -- and the
+           operator WATCHES each fin move the direction they expect.
+        2. If that run happened ON THE RAIL (vertical and still), completing it
+           latches fin_check_valid.
+        3. ARM is then a normal single press: pre-arm requires fin_check_valid, so
+           ARM simply succeeds. The arm press IS the operator's attestation that the
+           fins were correct.
 
-    /*
-      True when the running sequence is an on-demand BENCH test rather than the
-      arming gate.
+      Why on-rail matters: a bench wiggle in the workshop must NOT satisfy the gate,
+      or someone could clear it off the rail and then arm without re-checking. A run
+      that is not vertical-and-still still drives the fins (so you can bench-test)
+      but does not latch fin_check_valid.
 
-      This distinction is load-bearing. A bench run must NOT satisfy the arming
-      confirmation, or someone could wiggle the fins in the workshop and then arm
-      on the rail with the gate already cleared -- exactly the check we are trying
-      to force. Bench runs finish by returning to PREP and clearing themselves.
+      fin_check_valid is cleared by: disarm, reboot, a timeout, or the airframe
+      being disturbed after the check (gyro spike) -- so you cannot check, bump the
+      rail, then arm on a stale confirmation.
      */
-    bool     fin_check_bench;
+    bool     fin_check_valid;        // a good on-rail check is latched
+    uint32_t fin_check_valid_ms;     // when it was latched (for the timeout)
+    uint32_t fin_check_start_ms;     // 0 when no wiggle is running
+    bool     fin_check_on_rail;      // does the running wiggle count toward arming?
 
     // rocket_control.cpp
     void run_fin_check();
-    void start_fin_check(bool gating);
+    void start_fin_check(bool on_rail);
+    void update_fin_check_validity();   // clear the latch on movement / timeout
 public:
-    // Start an on-demand fin test from a ground station (MAV_CMD_DO_MOTOR_TEST).
-    // Refuses while armed. Does not affect the arming fin-check gate.
-    bool start_bench_fin_test();
+    // Trigger the fin check from a ground station (MAV_CMD_DO_AUX_FUNCTION). Refused
+    // while armed. Latches the arming gate only if run on the rail (vertical/still).
+    bool trigger_fin_check();
+    // True once a good on-rail fin check has been latched and not invalidated.
+    bool fin_check_ok() const;
 
     /*
       Angle of the airframe away from TRUE VERTICAL, in degrees.

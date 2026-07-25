@@ -222,7 +222,7 @@ directory name (`Tools/ardupilotwaf/ardupilotwaf.py:136`) — no build registrat
 | `system.cpp` | `init_ardupilot()`, `allocate_motors()`, **`ahrs_view = ahrs.create_view(ROTATION_PITCH_90);`** ← the key trick, and **`ahrs.init()` + `ins.init(scheduler.get_loop_rate_hz())`** — mandatory; without the IMU init the main loop blocks forever in `wait_for_sample()` and the vehicle never runs. | `ArduCopter/system.cpp:358-431`, `Blimp::startup_INS_ground()` |
 | `rocket_control.cpp` | The whole flight controller (§3). ~150 lines. Replaces the entire `mode*.cpp` family. | `ArduCopter/mode_stabilize.cpp:9-60` (spool-state switch) |
 | `AP_Arming_Rocket.h/.cpp` | `arm()` must reset the stage detector AND propagate the armed state: `hal.util->set_soft_armed(true)`, `motors->armed(true)`, logger/notify, and `ahrs.resetHeightDatum()` when there is no home (there never is — no GPS). Omitting the propagation leaves the stage machine stuck in PREP. Also overrides `rc_calibration_checks() → true` (no RC) and enforces vertical-and-still on the rail. | `Blimp/AP_Arming_Blimp.*` |
-| `GCS_Rocket.*`, `GCS_MAVLink_Rocket.*` | Required — `GCS::create_gcs_mavlink_backend()` is pure virtual under `HAL_GCS_ENABLED`. `frame_type()` → `MAV_TYPE_GENERIC` (no upstream `MAV_TYPE_ROCKET`). `custom_mode()` → flight stage. `base_mode()` must OR in `MAV_MODE_FLAG_SAFETY_ARMED` or every GCS shows the vehicle disarmed while it is live. Overrides `handle_command_int_packet()` to catch `MAV_CMD_DO_MOTOR_TEST` for the bench fin test (§3b). Overrides `send_attitude()` (view frame), `send_global_position_int()` and — via `try_send_message()` because `send_vfr_hud()` is not virtual — `MSG_VFR_HUD`, so that **all three** heading fields carry the magnetometer heading from `rocket_heading_rad()` instead of the EKF's meaningless nose-up yaw. **Must also override `try_send_message()`** to consume `MSG_WIND`: the stream tables are shared across all vehicles and every other vehicle implements it, so omitting it kills the vehicle in SITL and floods the link on hardware the moment a GCS requests all streams. | `Blimp/GCS_*` |
+| `GCS_Rocket.*`, `GCS_MAVLink_Rocket.*` | Required — `GCS::create_gcs_mavlink_backend()` is pure virtual under `HAL_GCS_ENABLED`. `frame_type()` → `MAV_TYPE_GENERIC` (no upstream `MAV_TYPE_ROCKET`). `custom_mode()` → flight stage. `base_mode()` must OR in `MAV_MODE_FLAG_SAFETY_ARMED` or every GCS shows the vehicle disarmed while it is live. Overrides `handle_command_int_packet()` to catch `MAV_CMD_DO_AUX_FUNCTION` (func 300) for the fin check (§3b), with `MAV_CMD_DO_MOTOR_TEST` as a fallback. Overrides `send_attitude()` (view frame), `send_global_position_int()` and — via `try_send_message()` because `send_vfr_hud()` is not virtual — `MSG_VFR_HUD`, so that **all three** heading fields carry the magnetometer heading from `rocket_heading_rad()` instead of the EKF's meaningless nose-up yaw. **Must also override `try_send_message()`** to consume `MSG_WIND`: the stream tables are shared across all vehicles and every other vehicle implements it, so omitting it kills the vehicle in SITL and floods the link on hardware the moment a GCS requests all streams. | `Blimp/GCS_*` |
 | `Log.cpp` | `RKT` message: stage, tilt error, fin commands, spin rate, body-up accel, dynamic pressure. | `Blimp/Log.cpp` |
 | `RC_Channel_Rocket.h/.cpp` | **(added during implementation, not in original plan)** A minimal `RC_Channels` subclass. The vehicle has no receiver, but shared code (`AP_CRSF_Telem::queue_message`, reached from `GCS::send_text`) dereferences the `rc()` singleton unconditionally, so the object must exist or the process segfaults on the first status text. | `Blimp/RC_Channel_Blimp.*` |
 
@@ -273,19 +273,34 @@ This revises the earlier draft, which incorrectly shut the controller down at bu
 
 ## 3b. Arming sequence, rail capture, and the fin check
 
-Arming is a **two-phase handshake**, not a single command:
+Arming is a **single ARM press, gated on a separately-triggered fin check**:
 
 ```
-ARM (1st)  -> pre-arm checks run
+Fin Check  -> GCS "Fin Check" button (MAV_CMD_DO_AUX_FUNCTION, param1 = 300)
            -> FINCHECK stage: fins wiggle one at a time, each announced
-           -> returns FAILED. The vehicle is NOT armed.
-ARM (2nd)  -> operator confirming what they saw
-           -> rail attitude captured, vehicle arms
+           -> on the rail (vertical & still) this LATCHES fin_check_valid
+           -> returns to PREP. "Rocket: fin check done - if fins moved right, ARM"
+              (NOT "OK": the code cannot see the fins, only that the wiggle ran; the
+              verdict is the operator's, recorded by the ARM press below)
+ARM        -> single press. Pre-arm requires fin_check_valid, so until the check
+              is run, ARM fails with "fin check required" (the standard GCS pre-arm
+              reason line) rather than a confusing error. Once latched, ARM simply
+              succeeds; rail attitude captured. The arm press is the attestation.
 ```
 
-Latched for the power cycle: a disarm/re-arm after a scrubbed countdown does not
-repeat the wiggle. A reboot does. 60 s confirmation timeout falls back to PREP so it
-cannot sit half-committed.
+The latch is invalidated by: disarm, reboot, a ~5-minute timeout, or a gyro spike
+(the airframe disturbed after the check) — so you cannot check, bump the rail, then
+arm on a stale confirmation. A fin check run OFF the rail (held in hand) still drives
+the fins so you can bench-test, but does NOT latch the gate.
+
+### Why a dedicated aux-function, not Motor Test
+
+The trigger is `MAV_CMD_DO_AUX_FUNCTION` (func 300, the SCRIPTING_1 slot), NOT
+`MAV_CMD_DO_MOTOR_TEST`. These are fins, not motors, and DO_MOTOR_TEST surfaces as a
+mislabelled, buried "Motor Test" panel. A QGC custom-action file
+(`Tools/ArduRocket/qgc/ArduRocket.json`) adds a one-tap button literally labelled
+**"Fin Check"**. DO_MOTOR_TEST is still accepted as a fallback for ground stations
+without the custom button.
 
 ### What the fin check DOES NOT do
 
@@ -314,13 +329,15 @@ It refuses to let the check be skipped, and puts the fins in front of a human:
 - **Announces each fin as it starts moving** (`Rocket: fin 3`), so the crew can confirm
   the fin that moves is the fin that was named -- this is what makes a swapped output
   channel visible.
-- **Blocks arming** until a human sends ARM a second time to confirm.
+- **Blocks arming** until the check has been run on the rail (pre-arm requires the
+  latched `fin_check_valid`), so it cannot be skipped.
 
 The operator's job during the wiggle is to check, for each announced fin:
 1. the fin that moves is the one named, and
 2. it deflects in the direction that would push the nose **back toward** the rail line.
 
-If either is wrong, do not send the second ARM.
+If either is wrong, do not ARM -- disarm/re-run. The ARM press is your attestation
+that every fin moved correctly.
 
 ### What IS genuinely automated
 
@@ -387,7 +404,7 @@ invisible to software. Direction is still a human judgement.
 **The target is always true vertical.** The rocket corrects to vertical once it is
 flying; that is the whole point of the vehicle.
 
-What the second ARM records is *how far off vertical the rail points*. That measurement
+What the ARM press records is *how far off vertical the rail points*. That measurement
 exists so the vehicle can reach vertical without demanding the entire correction as a
 step input at the worst possible moment. Rails are routinely tilted a few degrees (into
 wind, away from the crowd; NAR/Tripoli cap it at 20°), and commanding vertical from
@@ -476,14 +493,16 @@ from SITL runs, not from memory.
 
 Connect over **TCP `127.0.0.1:5760`** (see the WSL2 note near the top — do not use UDP).
 
-### a) Bench test — the fin check
+### a) The fin check (bench or rail)
 
-`MAV_CMD_DO_MOTOR_TEST` is reused as "run the fin sequence", because every GCS already
-has UI for it (look for a **Motor Test** panel). **All of its parameters — motor number,
-throttle, duration — are ignored.** The sequence is fixed.
+Triggered by `MAV_CMD_DO_AUX_FUNCTION` param1 = 300 — the **"Fin Check"** button from
+the QGC custom-action file (`Tools/ArduRocket/qgc/ArduRocket.json`). `MAV_CMD_DO_MOTOR_TEST`
+also works as a fallback (built-in Motor Test panel) for a GCS without the button.
 
-You get `Rocket: FIN BENCH TEST - watch the fins`, then each fin driven in turn and
-announced as `Rocket: fin N`:
+The **same** command serves bench and rail: on the rail (vertical & still) completing
+it latches the arming gate; held in the hand it just exercises the fins and announces
+`(bench, will NOT arm)`. You get `Rocket: FIN CHECK - watch the fins`, then each fin
+driven in turn and announced as `Rocket: fin N`:
 
 | | |
 |---|---|
@@ -528,21 +547,19 @@ Worth watching:
   `get_velocity_NED()`, the scheduler uses `get_velocity_D(velD, true)`. They track each
   other only because the motion is near-vertical (408.6 vs 407.9 m/s).
 
-### c) Arm — two presses, and the first one "fails"
+### c) Fin check, then a single-press arm
 
-Pre-arm gates: **tilt within a 20° cone** of vertical, gyro < 15 °/s, and all four fins
-assigned to `SERVO1-4_FUNCTION` = 190–193.
+Pre-arm gates: **tilt within a 20° cone** of vertical, gyro < 15 °/s, all four fins
+assigned to `SERVO1-4_FUNCTION` = 190–193, and **the fin check latched on the rail**.
 
-1. **ARM.** Runs the fin check and **returns FAILED** (result 4). The vehicle enters
-   FINCHECK (stage 1) and is **not armed**.
-2. **Watch the 5.2 s sequence** and confirm each fin is the one announced.
-3. **ARM again** within **60 s** → result 0. You get `Rocket: fin check confirmed`, then
-   `Rocket: rail attitude X/Y deg` (the calibration capture), then
-   `Rocket: armed, on the rail`.
+1. **Tap "Fin Check"** (the QGC custom-action button, or the Motor Test panel as a
+   fallback). The 5.2 s wiggle runs — **watch each announced fin** move the direction
+   you expect. On the rail it ends with `Rocket: fin check done - if fins moved right, ARM`.
+2. **ARM.** One press → `Rocket: rail attitude X/Y deg` then `Rocket: armed, on the rail`.
 
-> ⚠️ **The GCS will show that first ARM as an error popup.** That is the design working.
-> It is exactly the kind of thing that gets muscle-memoried into "press until it works",
-> so know it before standing at a pad.
+> Until you run the fin check, ARM stays blocked with `PreArm: fin check required (run
+> it on the rail)` in the GCS's normal pre-arm readout — **not** an error popup. The
+> arm press is your attestation that the fins were correct.
 
 ## 4. Scheduler table
 

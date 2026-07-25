@@ -57,7 +57,26 @@ const struct AP_Param::GroupInfo *GCS::_chan_var_info[MAVLINK_COMM_NUM_BUFFERS];
 #define AP_MAV_DEFAULT_STREAM_RATE_EXTRA3 1
 #define AP_MAV_DEFAULT_STREAM_RATE_PARAMS 10
 #define AP_MAV_DEFAULT_STREAM_RATE_ADSB 5
-#elif APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_Blimp) || APM_BUILD_TYPE(APM_BUILD_ArduRocket) || APM_BUILD_TYPE(APM_BUILD_Replay) || APM_BUILD_TYPE(APM_BUILD_AP_Periph)
+#elif APM_BUILD_TYPE(APM_BUILD_ArduRocket)
+// ArduRocket keeps flight telemetry silent by default (no ground station in flight),
+// EXCEPT the PARAMS stream. The AVAILABLE_MODES list (the flight-stage names) is
+// walked one entry per poll of this stream, so at 0 Hz a ground station that only
+// sends a one-shot request receives just the first stage and the rest never arrive.
+// A low nonzero rate makes the six-stage walk complete on its own in a few seconds,
+// rather than depending on the GCS to raise the stream itself. It is silent when
+// idle (NEXT_PARAM and AVAILABLE_MODES send nothing unless a download or mode
+// request is in progress), so this does not compromise the in-flight-quiet posture.
+#define AP_MAV_DEFAULT_STREAM_RATE_RAW_SENS 0
+#define AP_MAV_DEFAULT_STREAM_RATE_EXT_STAT 0
+#define AP_MAV_DEFAULT_STREAM_RATE_RC_CHAN 0
+#define AP_MAV_DEFAULT_STREAM_RATE_RAW_CTRL 0
+#define AP_MAV_DEFAULT_STREAM_RATE_POSITION 0
+#define AP_MAV_DEFAULT_STREAM_RATE_EXTRA1 0
+#define AP_MAV_DEFAULT_STREAM_RATE_EXTRA2 0
+#define AP_MAV_DEFAULT_STREAM_RATE_EXTRA3 0
+#define AP_MAV_DEFAULT_STREAM_RATE_PARAMS 2
+#define AP_MAV_DEFAULT_STREAM_RATE_ADSB 0
+#elif APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_Blimp) || APM_BUILD_TYPE(APM_BUILD_Replay) || APM_BUILD_TYPE(APM_BUILD_AP_Periph)
 #define AP_MAV_DEFAULT_STREAM_RATE_RAW_SENS 0
 #define AP_MAV_DEFAULT_STREAM_RATE_EXT_STAT 0
 #define AP_MAV_DEFAULT_STREAM_RATE_RC_CHAN 0

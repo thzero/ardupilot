@@ -37,38 +37,70 @@ const char *ArduRocket::stage_string() const
 #define FIN_CHECK_CENTRE_MS  300u   // settle between fins
 #define FIN_CHECK_PER_FIN_MS (2 * FIN_CHECK_PHASE_MS + FIN_CHECK_CENTRE_MS)
 #define FIN_CHECK_TOTAL_MS   (AP_FIN_MIXER_ROCKET_NUM_FINS * FIN_CHECK_PER_FIN_MS)
-#define FIN_CHECK_CONFIRM_TIMEOUT_MS 60000u   // operator has this long to confirm
 
-void ArduRocket::start_fin_check(bool gating)
+void ArduRocket::start_fin_check(bool on_rail)
 {
     fin_check_start_ms = AP_HAL::millis();
-    fin_check_awaiting = false;
-    fin_check_bench = !gating;
+    fin_check_on_rail = on_rail;
     set_stage(FlightStage::FINCHECK);
-    gcs().send_text(MAV_SEVERITY_WARNING, "Rocket: FIN %s - watch the fins",
-                    gating ? "CHECK" : "BENCH TEST");
+    gcs().send_text(MAV_SEVERITY_WARNING, "Rocket: FIN CHECK%s - watch the fins",
+                    on_rail ? "" : " (bench, will NOT arm)");
 }
 
 /*
-  On-demand fin test, triggered by MAV_CMD_DO_MOTOR_TEST from a ground station so the
-  fins can be exercised on the bench without going through an arming attempt.
+  Trigger the fin check from a ground station. Bound to MAV_CMD_DO_AUX_FUNCTION so a
+  GCS button labelled "Fin Check" can fire it (see GCS_MAVLink_Rocket.cpp) -- the same
+  wiggle whether it will count toward arming or is just a bench exercise.
 
-  Runs the identical sequence to the arming check -- same code path, so what you
-  verify on the bench is what runs on the rail -- but deliberately does NOT satisfy
-  the arming gate. A bench run in the workshop must never let someone skip the
-  on-the-rail check.
+  The SAME command serves both: whether it counts is decided by where the airframe
+  is. On the rail (vertical and still) the completed run latches fin_check_valid, so
+  the operator can then arm with a single press. Held in the hand on the bench, it
+  still drives the fins so you can verify them, but does NOT latch the gate -- a
+  workshop wiggle must never let someone arm on the rail without re-checking.
  */
-bool ArduRocket::start_bench_fin_test()
+bool ArduRocket::trigger_fin_check()
 {
     if (motors == nullptr) {
         return false;
     }
     if (motors->armed()) {
-        gcs().send_text(MAV_SEVERITY_WARNING, "Rocket: fin test refused - vehicle is armed");
+        gcs().send_text(MAV_SEVERITY_WARNING, "Rocket: fin check refused - vehicle is armed");
         return false;
     }
-    start_fin_check(false);
+    if (fin_check_start_ms != 0) {
+        return false;   // one already running
+    }
+
+    // On the rail = near-vertical and still. Same thresholds the arming gate uses.
+    const bool on_rail = (tilt_from_vertical_deg() <= 20.0f) &&
+                         (ahrs.get_gyro().length() <= radians(15.0f));
+    start_fin_check(on_rail);
     return true;
+}
+
+/*
+  Invalidate a latched fin check if the airframe is disturbed or too much time has
+  passed, so a stale confirmation cannot be used to arm. Called every control loop
+  while disarmed.
+ */
+void ArduRocket::update_fin_check_validity()
+{
+    if (!fin_check_valid) {
+        return;
+    }
+    // ~5 minutes, and a gyro spike (being carried / bumped on the rail)
+    const bool expired = (AP_HAL::millis() - fin_check_valid_ms) > 300000u;
+    const bool disturbed = ahrs.get_gyro().length() > radians(30.0f);
+    if (expired || disturbed) {
+        fin_check_valid = false;
+        gcs().send_text(MAV_SEVERITY_WARNING, "Rocket: fin check cleared (%s) - re-run",
+                        expired ? "timeout" : "moved");
+    }
+}
+
+bool ArduRocket::fin_check_ok() const
+{
+    return fin_check_valid;
 }
 
 void ArduRocket::run_fin_check()
@@ -80,30 +112,26 @@ void ArduRocket::run_fin_check()
     const uint32_t elapsed = AP_HAL::millis() - fin_check_start_ms;
 
     if (elapsed >= FIN_CHECK_TOTAL_MS) {
-        // sequence complete: centre the fins
+        // sequence complete: centre the fins and return to PREP
         motors->set_fin_test(-1, 0.0f);
+        fin_check_start_ms = 0;
+        set_stage(FlightStage::PREP);
 
-        if (fin_check_bench) {
-            // Bench test: just finish. Deliberately does NOT set fin_check_awaiting,
-            // so this run cannot be used as the arming confirmation.
-            gcs().send_text(MAV_SEVERITY_INFO, "Rocket: fin bench test complete");
-            fin_check_start_ms = 0;
-            fin_check_bench = false;
-            set_stage(FlightStage::PREP);
-            return;
-        }
-
-        if (!fin_check_awaiting) {
-            fin_check_awaiting = true;
+        if (fin_check_on_rail) {
+            // On the rail: latch the gate so ARM becomes a single clean press.
+            //
+            // Deliberately NOT announced as "OK": the software cannot see the fins,
+            // only that the motion command finished. The verdict is the operator's.
+            // ARM is how they record it -- so this message hands the decision back
+            // rather than claiming a pass the code has no way to reach.
+            fin_check_valid = true;
+            fin_check_valid_ms = AP_HAL::millis();
             gcs().send_text(MAV_SEVERITY_WARNING,
-                            "Rocket: fin check done - ARM again to confirm");
-        }
-        // Do not wait forever half-committed; fall back to PREP.
-        if (elapsed >= FIN_CHECK_TOTAL_MS + FIN_CHECK_CONFIRM_TIMEOUT_MS) {
-            gcs().send_text(MAV_SEVERITY_WARNING, "Rocket: fin check timed out");
-            fin_check_start_ms = 0;
-            fin_check_awaiting = false;
-            set_stage(FlightStage::PREP);
+                            "Rocket: fin check done - if fins moved right, ARM");
+        } else {
+            // Bench run: verified the fins but does NOT satisfy the arming gate.
+            gcs().send_text(MAV_SEVERITY_INFO,
+                            "Rocket: fin bench test complete (does not arm)");
         }
         return;
     }
@@ -239,12 +267,15 @@ void ArduRocket::run_rocket_control()
     // being disarmed (PREP covers both the table and the rail).
     if (!motors->armed()) {
         if (fin_check_start_ms != 0) {
-            // fin check in progress or awaiting confirmation: drive the sequence
-            // and leave the controller alone. Still disarmed.
+            // fin check wiggle in progress: drive the sequence, leave the
+            // controller alone. Still disarmed.
             set_stage(FlightStage::FINCHECK);
             run_fin_check();
             return;
         }
+        // Expire/invalidate a latched fin check if the airframe is disturbed, so a
+        // stale confirmation cannot be used to arm.
+        update_fin_check_validity();
         set_stage(FlightStage::PREP);
     } else {
         switch (rkt.stage()) {

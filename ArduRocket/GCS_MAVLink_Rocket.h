@@ -4,6 +4,12 @@
 
 #include "defines.h"
 
+// Aux-function number that triggers the fin check via MAV_CMD_DO_AUX_FUNCTION.
+// 300 is the first of ArduPilot's SCRIPTING_1.. slots -- the range reserved for
+// vehicle/script-specific actions, so it collides with no standard RC option. The
+// GCS "Fin Check" button sends DO_AUX_FUNCTION with param1 = this value.
+#define RKT_AUX_FUNC_FIN_CHECK 300
+
 class GCS_MAVLINK_Rocket : public GCS_MAVLINK
 {
 

@@ -180,10 +180,10 @@ ArduRocket::ArduRocket(void)
       stage(FlightStage::PREP),
       rail_roll_rad(0.0f),
       rail_pitch_rad(0.0f),
-      fin_check_done(false),
-      fin_check_awaiting(false),
+      fin_check_valid(false),
+      fin_check_valid_ms(0),
       fin_check_start_ms(0),
-      fin_check_bench(false),
+      fin_check_on_rail(false),
       dynamic_pressure_pa(0.0f),
       param_loader(var_info),
       initialised(false)

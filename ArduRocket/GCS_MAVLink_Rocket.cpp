@@ -101,12 +101,51 @@ void GCS_MAVLINK_Rocket::send_pid_tuning()
 }
 
 /*
-  The vehicle has exactly one behaviour and no selectable modes, so there is no
-  mode list to advertise.
+  Advertise the flight stages as AVAILABLE_MODES so a ground station shows the
+  stage by NAME ("BOOST") rather than as a bare custom_mode number.
+
+  Every stage is flagged NOT_USER_SELECTABLE. The stages are not modes a person can
+  command -- set_mode() refuses everything, and the machine advances only on sensed
+  flight events (launch accel, apogee). Advertising them as selectable would put a
+  dropdown in the GCS that silently does nothing; the flag makes them read-only
+  labels instead, which is what they are.
+
+  Called once per index, 1-based, and must return the TOTAL count each time (the
+  base class walks the list by asking for each index in turn). The custom_mode
+  numbers here MUST equal the FlightStage enum values, since get_mode() returns the
+  stage as the heartbeat's custom_mode and the GCS matches the two up.
  */
 uint8_t GCS_MAVLINK_Rocket::send_available_mode(uint8_t index) const
 {
-    return 0;
+    struct {
+        FlightStage stage;
+        const char *name;
+    } static const modes[] {
+        { FlightStage::PREP,     "Prep" },
+        { FlightStage::FINCHECK, "Fin check" },
+        { FlightStage::ARMED,    "Armed" },
+        { FlightStage::BOOST,    "Boost" },
+        { FlightStage::COAST,    "Coast" },
+        { FlightStage::DESCENT,  "Descent" },
+    };
+    const uint8_t mode_count = ARRAY_SIZE(modes);
+
+    // out of range: report the count but send nothing
+    if (index == 0 || index > mode_count) {
+        return mode_count;
+    }
+    const auto &m = modes[index - 1];
+
+    mavlink_msg_available_modes_send(
+        chan,
+        mode_count,
+        index,
+        MAV_STANDARD_MODE::MAV_STANDARD_MODE_NON_STANDARD,
+        (uint8_t)m.stage,
+        MAV_MODE_PROPERTY_NOT_USER_SELECTABLE,   // stages are sensed, never commanded
+        m.name);
+
+    return mode_count;
 }
 
 /*
@@ -343,18 +382,34 @@ MAV_RESULT GCS_MAVLINK_Rocket::handle_command_int_packet(const mavlink_command_i
 {
     switch (packet.command) {
 
+    case MAV_CMD_DO_AUX_FUNCTION:
+        /*
+          "Fin Check" trigger. param1 is the aux-function number; we own
+          RKT_AUX_FUNC_FIN_CHECK and pass everything else through to the base class.
+
+          This is deliberately NOT MAV_CMD_DO_MOTOR_TEST: these are fins, not motors,
+          and DO_MOTOR_TEST surfaces in a ground station as a "Motor Test" panel,
+          which is both mislabelled and buried. DO_AUX_FUNCTION is the generic
+          "invoke a named action" command; a ground-station button (see the QGC
+          custom-action file shipped with this vehicle) labels it "Fin Check".
+
+          Triggering on the rail latches the arming gate; on the bench it just
+          exercises the fins. See ArduRocket::trigger_fin_check().
+         */
+        if ((uint16_t)packet.param1 == RKT_AUX_FUNC_FIN_CHECK) {
+            return rocket.trigger_fin_check() ? MAV_RESULT_ACCEPTED
+                                              : MAV_RESULT_TEMPORARILY_REJECTED;
+        }
+        return GCS_MAVLINK::handle_command_int_packet(packet, msg);
+
     case MAV_CMD_DO_MOTOR_TEST:
         /*
-          Reused as "run the fin sequence" so the fins can be exercised on the
-          bench from any ground station -- Mission Planner and QGC already have UI
-          for this command. Parameters are ignored: the sequence is fixed, and
-          running the SAME sequence as the arming check means what you verify on
-          the bench is exactly what runs on the rail.
-
-          This does NOT satisfy the arming fin-check gate (see ArduRocket.h), and
-          is refused while armed.
+          Kept as a fallback for ground stations without a custom "Fin Check" button:
+          their built-in Motor Test panel still runs the fin check. Same behaviour as
+          the aux-function path -- on the rail it counts, on the bench it does not.
          */
-        return rocket.start_bench_fin_test() ? MAV_RESULT_ACCEPTED : MAV_RESULT_TEMPORARILY_REJECTED;
+        return rocket.trigger_fin_check() ? MAV_RESULT_ACCEPTED
+                                          : MAV_RESULT_TEMPORARILY_REJECTED;
 
     default:
         return GCS_MAVLINK::handle_command_int_packet(packet, msg);

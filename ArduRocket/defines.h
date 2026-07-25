@@ -32,10 +32,11 @@ enum LoggingParameters {
  */
 enum class FlightStage : uint8_t {
     PREP     = 0,  // disarmed. On the table OR on the rail. Fins centered.
-    FINCHECK = 1,  // arm requested and pre-arm passed: driving the fin wiggle so the
-                   // pad crew can watch each fin move, in order, and confirm it is
-                   // the fin that was announced and that it moves the right way.
-                   // NOT ARMED. The operator must send ARM again to confirm.
+    FINCHECK = 1,  // fin check triggered from the GCS (its own button, not ARM):
+                   // driving the fin wiggle so the pad crew can watch each fin move,
+                   // in order, and confirm it is the fin that was announced and that
+                   // it moves the right way. NOT ARMED. On the rail the completed run
+                   // latches the arming gate; the operator's ARM press is the verdict.
     ARMED    = 2,  // armed on the rail, pre-launch. Attitude live (P/D), I-terms held.
     BOOST    = 3,  // launch detected, motor burning. Full fin authority.
     COAST    = 4,  // burnout recorded, still ascending. Fins KEEP steering (aero fins

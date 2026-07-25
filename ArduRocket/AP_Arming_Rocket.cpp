@@ -75,6 +75,18 @@ bool AP_Arming_Rocket::pre_arm_checks(bool display_failure)
     }
 
     /*
+      The fin check must have been run and confirmed on the rail. This is the gate
+      that makes the human fin-direction check unskippable: ARM stays blocked, with
+      this reason shown in the ground station's standard pre-arm readout, until the
+      operator has triggered the fin check on the rail and watched it. See
+      ArduRocket.h for the operator flow. The arm press itself is the attestation.
+     */
+    if (!rocket.fin_check_ok()) {
+        check_failed(display_failure, "fin check required (run it on the rail)");
+        return false;
+    }
+
+    /*
       NOTE: there is deliberately no "is GPS in the EKF?" check here.
 
       An earlier version warned when the EKF had a horizontal position solution,
@@ -96,40 +108,17 @@ bool AP_Arming_Rocket::arm(AP_Arming::Method method, bool do_arming_checks)
     }
 
     /*
-      Two-phase arm, gated on the fin check.
+      Single-press arm, gated on the fin check via pre_arm_checks() above.
 
-      Fin direction cannot be verified in software (no airflow, no motion, and the
-      mixer-vs-attitude comparison is circular), so the check is a human one -- and
-      this makes it unskippable rather than pretending to automate it.
-
-      First ARM of a power cycle: run the wiggle and return WITHOUT arming. The
-      operator watches each announced fin move, then sends ARM again to confirm.
-      Only that second command arms the vehicle.
-
-      The gate runs BEFORE AP_Arming::arm(), so a declined first attempt leaves
-      nothing half-committed. Pre-arm is evaluated here explicitly for the same
-      reason: we must not start the wiggle on an airframe that would have failed
-      pre-arm anyway.
+      Fin direction cannot be verified in software, so it is a human check -- made
+      unskippable by requiring fin_check_ok() in pre-arm. The operator triggers the
+      fin check on the rail (a ground-station "Fin Check" button), watches each
+      announced fin move, and then arms. Until that check is latched, this arm call
+      fails pre-arm with a clear "fin check required" reason in the GCS, so ARM
+      never spuriously errors -- it simply stays blocked with the reason shown, then
+      succeeds once the check is done. The arm press is the operator's attestation
+      that the fins moved correctly.
      */
-    if (!rocket.fin_check_done) {
-        if (do_arming_checks && !pre_arm_checks(true)) {
-            AP_Notify::events.arming_failed = true;
-            return false;
-        }
-        if (!rocket.fin_check_awaiting) {
-            rocket.start_fin_check(true);
-            return false;
-        }
-        // second ARM while awaiting: this is the operator's confirmation
-        rocket.fin_check_done = true;
-        rocket.fin_check_awaiting = false;
-        rocket.fin_check_start_ms = 0;
-        if (rocket.motors != nullptr) {
-            rocket.motors->set_fin_test(-1, 0.0f);   // leave test mode
-        }
-        gcs().send_text(MAV_SEVERITY_INFO, "Rocket: fin check confirmed");
-    }
-
     if (!AP_Arming::arm(method, do_arming_checks)) {
         AP_Notify::events.arming_failed = true;
         return false;
@@ -208,6 +197,10 @@ bool AP_Arming_Rocket::disarm(AP_Arming::Method method, bool do_disarm_checks)
         rocket.motors->armed(false);
     }
     hal.util->set_soft_armed(false);
+
+    // A fresh arming cycle must re-run the fin check: clear the latch on disarm so a
+    // scrubbed countdown cannot be re-armed on a stale confirmation.
+    rocket.fin_check_valid = false;
 
 #if HAL_LOGGING_ENABLED
     AP::logger().set_vehicle_armed(false);
