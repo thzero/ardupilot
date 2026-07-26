@@ -564,28 +564,70 @@ assigned to `SERVO1-4_FUNCTION` = 190–193, and **the fin check latched on the 
 ## 4. Scheduler table
 
 `Blimp/Blimp.cpp:50-95` is the shape. Entries **must be priority-ordered**; the table is interleaved
-with `AP_Vehicle::get_common_scheduler_tasks()`.
+with `AP_Vehicle::get_common_scheduler_tasks()`. The main loop runs at **400 Hz** (ArduRocket is in the
+400 Hz group in `AP_Scheduler.cpp`; see §8.9 — a vehicle left out of that branch silently drops to 50 Hz).
+A `FAST_TASK` runs once per loop, i.e. at the loop rate.
 
-```cpp
-FAST_TASK_CLASS(AP_InertialSensor, &rocket.ins, update),
-FAST_TASK(motors_output),        // fins first, minimum latency
-FAST_TASK(read_AHRS),
-FAST_TASK(run_rocket_control),   // launch detect + attitude, 400 Hz
-SCHED_TASK(update_batt_compass, 10, 120, 12),
-SCHED_TASK(update_altitude,     10, 100, 21),   // baro: speed estimate + apogee cross-check
-SCHED_TASK(one_hz_loop,          1, 100, 39),
-SCHED_TASK_CLASS(GCS, ..., update_receive/update_send, 400, ..., 51/54),
-// + logging tasks
-```
+This is the complete table as implemented (`ArduRocket/ArduRocket.cpp`):
+
+| Task | Rate | Prio | What it does |
+|---|---|---|---|
+| `AP_InertialSensor::update` | 400 Hz (fast) | — | read the IMU; gates the loop via `wait_for_sample()` |
+| `motors_output` | 400 Hz (fast) | — | push fin PWM. **First**, for minimum actuation latency |
+| `read_AHRS` | 400 Hz (fast) | — | update the attitude estimate |
+| `run_rocket_control` | 400 Hz (fast) | — | stage detection + attitude control + dynamic-pressure gain schedule |
+| `AP_GPS::update` | 50 Hz | 9 | position **logging only**, never control (§3c) |
+| `update_batt_compass` | 10 Hz | 12 | battery monitor + compass (compass feeds GCS heading only, never control) |
+| `update_altitude` | 10 Hz | 21 | `barometer.update()` **and refresh the cached air density** (see below) |
+| `full_rate_logging` | 50 Hz | 33 | fast attitude / IMU log messages |
+| `AP_Notify::update` | 50 Hz | 36 | LEDs / buzzer |
+| `send_rocket_telemetry` | 5 Hz | 38 | `TILT` NAMED_VALUE_FLOAT to the GCS |
+| `one_hz_loop` | 1 Hz | 39 | housekeeping |
+| `GCS::update_receive` | 400 Hz | 51 | MAVLink in |
+| `GCS::update_send` | 400 Hz | 54 | MAVLink out |
+| `ten_hz_logging_loop` | 10 Hz | 57 | medium-rate log messages |
+| `AP_Logger::periodic_tasks` | 400 Hz | 63 | logger buffer flush |
+| `AP_InertialSensor::periodic` | 400 Hz | 66 | INS periodic housekeeping |
+| `AP_Scheduler::update_logging` | 0.1 Hz | 69 | scheduler performance log |
 
 Omitted, with reasons: `rc_loop`/`read_radio` (no RC — removes the RC failsafe surface entirely);
 `three_hz_loop`/`failsafe_gcs_check` (a GCS failsafe on a rocket is a misfire source);
 `ekf_check`/`check_vibration` (these trigger *mode changes* in Copter; inert given §2, and a rocket is
-guaranteed high-vibration — `check_vibration` would fire every flight); `AP_GPS::update` (attitude hold
-needs no position; add at 50 Hz/prio 9 only if position logging is wanted).
+guaranteed high-vibration — `check_vibration` would fire every flight).
 
 **Keep the GCS tasks** despite "no ground station" — autotest drives the vehicle over MAVLink. Keep the
 transport, delete the failsafes.
+
+### Air density is cached at 10 Hz, deliberately
+
+`run_rocket_control` computes dynamic pressure `q = ½·ρ·v²` every loop to schedule the fin gains. `v`
+(EKF vertical speed) genuinely changes every loop and is read at 400 Hz. **`ρ` is not**: it is refreshed
+in `update_altitude` at 10 Hz and cached in `air_density_kgm3`, and the 400 Hz path just reads the cached
+value. This keeps the `powf` inside `AP_Baro::get_air_density_for_alt_amsl`
+(`AP_Baro_atmosphere.cpp:227`, the ISA gradient-layer branch — where all hobby-rocket flight happens) out
+of the hot loop: ~400 `powf`/s becomes ~10.
+
+**Why 10 Hz is enough, quantified.** The cache is at most one 0.1 s interval stale. The fastest point of
+the whole flight is peak velocity, 403.6 m/s (the `validate_trajectory` reference), so the worst-case
+altitude staleness is `400 × 0.1 = 40 m`. Density change over 40 m in the ISA troposphere:
+
+```
+ρ(h)/ρ0 = (T/T0)^(g/(L·R) − 1),  T0=288.15 K, L=0.0065 K/m, g=9.80665, R=287.05
+  exponent = 5.2559 − 1 = 4.2559
+  at 40 m:  T/T0 = 287.89/288.15 = 0.999098
+  ρ/ρ0     = 0.999098^4.2559 = 0.996166  →  0.38% change
+```
+
+(Cross-check, log-derivative `d(lnρ)/dh = −g/(RT) + L/T = −9.60e−5 /m`, × 40 m = 0.384%. Agrees.)
+
+That worst-case 0.38% lands at **peak speed**, where `q` is ~96 kPa and the mixer gain `Q_REF/q ≈
+600/96000 ≈ 0.006` — the fins are barely deflecting, far below the `GAIN_MAX` cap, so a 0.38% error is
+invisible. Where the gain schedule *is* delicate (rail exit, near apogee), the airframe is moving slowly
+by definition, so altitude — and density — barely change between updates. It is also well under the fixed-Cd
+modelling error we already accept (which runs the modelled apogee several percent high). A faster airframe
+scales this linearly: ~600 m/s would give ~0.57%, still negligible. So 10 Hz is below the noise floor here,
+not a compromise; raising it during boost would spend the reclaimed hot-path CPU to shave an error nothing
+downstream can feel, at the one phase where it matters least.
 
 ## 5. `AP_FinMixerRocket` — new mixer (`libraries/AP_Motors/`)
 

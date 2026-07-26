@@ -226,11 +226,9 @@ void ArduRocket::update_dynamic_pressure()
     const float speed = fabsf(velD);
 
     // Air density falls with altitude, which matters because fin force tracks it
-    // directly. Over the few hundred metres a hobby rocket covers the correction
-    // is small, but it is free.
-    const float density = AP_Baro::get_air_density_for_alt_amsl(barometer.get_altitude_AMSL());
-
-    dynamic_pressure_pa = 0.5f * density * sq(speed);
+    // directly. It is refreshed at 10 Hz in update_altitude() and cached, so this
+    // 400 Hz path does not repeat the powf inside get_air_density_for_alt_amsl.
+    dynamic_pressure_pa = 0.5f * air_density_kgm3 * sq(speed);
 }
 
 void ArduRocket::run_rocket_control()

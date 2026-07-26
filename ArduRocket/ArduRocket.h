@@ -187,6 +187,13 @@ private:
     // Altitude/speed estimate, used to schedule the fin gains on dynamic pressure
     float dynamic_pressure_pa;
 
+    // Air density, refreshed in the 10 Hz update_altitude() task and cached here.
+    // Density tracks altitude, which changes slowly, so recomputing it every control
+    // loop (get_air_density_for_alt_amsl runs a powf) would be wasted work in the
+    // 400 Hz path. Seeded to the ISA sea-level value for the loops before the first
+    // baro update.
+    float air_density_kgm3 = 1.225f;
+
     // setup the var_info table
     AP_Param param_loader;
 

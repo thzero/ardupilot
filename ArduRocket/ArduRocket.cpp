@@ -125,6 +125,10 @@ void ArduRocket::read_AHRS(void)
 void ArduRocket::update_altitude()
 {
     barometer.update();
+
+    // Cache air density here, off the 400 Hz control path. It feeds the dynamic-
+    // pressure gain scheduling but changes only with altitude, so 10 Hz is ample.
+    air_density_kgm3 = AP_Baro::get_air_density_for_alt_amsl(barometer.get_altitude_AMSL());
 }
 
 void ArduRocket::motors_output()
