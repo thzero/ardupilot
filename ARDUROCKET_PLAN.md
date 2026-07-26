@@ -205,6 +205,83 @@ running `./waf rocket` silently keeps the old values.
 
 ---
 
+## 0. Target hardware
+
+The physical build this vehicle is aimed at. Everything here is **config-only on the ArduPilot side** —
+no code changes — because the sensors were designed out of the control path from the start (§3c: GPS and
+compass never steer). The one part that drove a real decision is the IMU G-range.
+
+| Role | Part | Notes |
+|---|---|---|
+| Flight controller | **iFlight BLITZ Wing H743** (ICM-45686) | H7 flash headroom; ±32 g IMU; servo-first "Wing" layout; onboard baro |
+| GPS + compass | u-blox **M10 combo** (Holybro M10 / Matek M10Q-5883) | recovery position + pad heading; never control |
+| Telemetry — air | **Matek mR24-30** (mLRS RX) | on a MAVLink UART, in the airframe |
+| Telemetry — ground | **Matek mR24-30-TX** + 2× 2.4 GHz antennas | bound pair; USB or WiFi to the laptop → QGC |
+| Actuators | **4× servos** on `SERVO1-4` (`k_rocketFin1-4`) | the four steering tabs |
+| Recovery / deployment | **OFF-BOARD** — Featherweight BlueRaven, or 2× Eggtimer Quantum | dedicated rocketry altimeter, sized to the rocket |
+| Ground station | QGroundControl + `Tools/ArduRocket/qgc/ArduRocket.json` | Fin Check action + the pre-arm/arm flow |
+
+### Flight controller: iFlight BLITZ Wing H743 (ICM-45686)
+
+- **H7, not F4.** ArduPilot 4.x no longer fits a full build in 1 MB F4 flash; the H743 (2 MB) has headroom
+  and runs EKF3 comfortably.
+- **±32 g IMU — the reason this board, not a smaller ±16 g one.** A rocket boosts far harder than a drone.
+  This airframe peaks at **173.7 m/s² ≈ 17.7 g** (the SIM/OpenRocket reference), and most FC IMUs
+  (ICM-42688, BMI270, MPU6000) saturate at **±16 g** — so they clip at peak boost. The ICM-45686 runs at
+  ±32 g and clears it with margin to ~29 g. This is **verified in the driver, not assumed**:
+  `AP_InertialSensor_Invensensev3.cpp:342` sets `accel_scale = ACCEL_SCALE_32G` for the ICM-45686, and the
+  per-chip clip limit at `:1140` is **29.5 g** for the ±32 g parts (vs 15.5 g for the ±16 g parts) — the
+  whole pipeline, including clip detection, treats it as a 32 g sensor.
+- **What the clip would and wouldn't break** (if you ever fall back to a ±16 g board): control is
+  unaffected — it is gyro-driven. Apogee *detection* is unaffected — it is a climb-rate-sign test that
+  fires near apogee where accel is ~0 g, nowhere near a clip. The **only** casualty is logged peak
+  accel/velocity during boost. So ±16 g flies fine; ±32 g just keeps the boost data honest.
+- **"Wing" layout** gives servo outputs and UARTs with no bundled 4-in-1 ESC — the right shape for a
+  servo-driven, no-ESC rocket.
+- **Verify before flight:** confirm the exact board/rev is a listed ArduPilot target and enumerates its
+  IMU as `ICM45686` (boot messages / a log's IMU device-type). That is the only board-specific unknown —
+  the ±32 g scaling itself is definitively correct in the driver.
+
+### GPS + compass: u-blox M10 combo
+
+- Carried for **recovery** (last-known position) and the **pad heading** number on the GCS — **never for
+  control** (`EK3_SRC1_POSXY/VELXY = 0`; compass display-only). Scheduled at 50 Hz for logging (§4).
+- A rocket is a friendly place for both: **solid motor → no compass current interference**, and a
+  **fiberglass airframe is GPS-transparent** (mount the module high with sky view; carbon would block it).
+- The GPS **drops lock under boost and reacquires on coast** — harmless, because it is never in the
+  control loop, and coast/descent is exactly the phase recovery cares about. Set the GPS **dynamic model to
+  airborne**. This airframe's ~400 m/s is under the COCOM 515 m/s cutoff; a higher-impulse build could hit it.
+
+### Telemetry link (recovery downlink): mLRS pair
+
+- **Air** `Matek mR24-30` (RX) on a MAVLink UART; **ground** `Matek mR24-30-TX` → laptop by USB (COM) or
+  WiFi (UDP) → QGC. Bind the pair once, matching mLRS params on both ends.
+- **Why mLRS, not the alternatives:** SiK/RFD900 are physically too big for the airframe. ELRS-MAVLink has
+  the smallest air unit (~1 g dual-band nano) but routes MAVLink through an **RC handset** on the ground —
+  odd for a vehicle that has no RC. mLRS's ground side is a **standalone module**, which is the clean fit
+  for a telemetry-only, no-RC build; the RX is still tiny next to a SiK.
+- The telemetry payload is trivial (position + a few status messages at 1–5 Hz), so **bandwidth never drove
+  the choice** — size and range did. Ground-side TX power is configurable 13–30 dBm; set it to what your
+  region allows (EU ~100 mW on 2.4 GHz) and what range actually needs, not the 1 W max.
+- FC side is identical to every other link: that UART's `SERIALx_PROTOCOL = 2`, matched baud. The TX kit
+  ships **without antenna or case** (adapter cables + a cooling fan included), so budget those.
+
+### Recovery / deployment is off-board, on purpose
+
+Pyro/chute deployment is **not** the flight controller's job — it is out of scope, and keeping it separate
+means deployment never rides on an apogee estimate we would rather not trust for a pyro event. It runs on a
+dedicated commercial rocketry altimeter: a **Featherweight BlueRaven**, or **two Eggtimer Quantums**
+(redundant dual-deploy) depending on rocket size.
+
+### Deliberately absent
+
+- **No RC receiver/transmitter.** No RC by design. The mLRS link is telemetry-only and does **not**
+  reintroduce a control surface: the UART is MAVLink protocol with no RC input functions mapped, and
+  `set_mode()` returns false so any stray RC frame is inert.
+- **No ESC.** Solid motor — nothing electric to drive.
+
+---
+
 ## 1. New vehicle: `ArduRocket/` (~14 files)
 
 Scaffolding from **Blimp** (the only modern minimal vehicle); control objects from **Copter**.
