@@ -1951,8 +1951,7 @@ const AP_Param::GroupInfo SIM::RocketParms::var_info[] = {
 
     // @Param: MARGIN
     // @DisplayName: Static margin
-    // @Description: Calibers of static margin, i.e. how far the centre of pressure sits aft of the centre of gravity in body diameters. This is what the fins fight: the airframe weathercocks into the relative wind, and the maximum angle of attack the tabs can hold is roughly the tab authority divided by this.
-    // @Units: calibers
+    // @Description: Static margin in calibers, i.e. how far the centre of pressure sits aft of the centre of gravity in body diameters. This is what the fins fight: the airframe weathercocks into the relative wind, and the maximum angle of attack the tabs can hold is roughly the tab authority divided by this. Dimensionless (a ratio of body diameters), so no unit is declared.
     // @Range: 0.5 6
     // @User: Advanced
     AP_GROUPINFO("MARGIN", 9, RocketParms, static_margin, 2.0),
@@ -1973,8 +1972,7 @@ const AP_Param::GroupInfo SIM::RocketParms::var_info[] = {
 
     // @Param: IMPULSE
     // @DisplayName: Total impulse
-    // @Description: Total impulse of the motor. Mass depletes against impulse delivered, not time.
-    // @Units: N.s
+    // @Description: Total impulse of the motor, in newton-seconds. Mass depletes against impulse delivered, not time. No unit is declared because ArduPilot has no impulse/momentum unit token.
     // @User: Advanced
     AP_GROUPINFO("IMPULSE", 12, RocketParms, impulse, 5414.0),
 
@@ -2022,8 +2020,7 @@ const AP_Param::GroupInfo SIM::RocketParms::var_info[] = {
 
     // @Param: DRAGA
     // @DisplayName: Drag area
-    // @Description: Cd times reference area. A single representative value; the real Cd varies with Mach. This is why the modelled apogee runs slightly high.
-    // @Units: m.m
+    // @Description: Cd times reference area, in square metres. A single representative value; the real Cd varies with Mach. This is why the modelled apogee runs slightly high. No unit is declared because ArduPilot has no plain-area unit token.
     // @User: Advanced
     AP_GROUPINFO("DRAGA", 19, RocketParms, drag_area, 0.005376),
 
