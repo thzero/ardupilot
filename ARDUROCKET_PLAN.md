@@ -196,8 +196,12 @@ Four fins give authority on all three. Write this table into a header comment; v
 ```
 ./waf configure --board sitl     # required after ANY change to rocket.parm
 ./waf rocket                     # builds build/sitl/bin/rocket
-build/sitl/bin/rocket --model rocket --speedup 5 -w
+build/sitl/bin/rocket --model rocket -w    # real time -- do NOT add --speedup
 ```
+
+Run in **real time** (no `--speedup`). A short burn integrated at a coarser step under speedup changes
+the results measurably (a worst-case tilt read 19° at `--speedup 5` vs 15° at real time), so any run you
+draw numbers from must be real-time.
 
 Note the reconfigure: `Tools/autotest/default_params/rocket.parm` is embedded into ROMFS at
 **configure** time (`Tools/ardupilotwaf/boards.py` globs `default_params/`), so editing it and only
@@ -282,7 +286,7 @@ dedicated commercial rocketry altimeter: a **Featherweight BlueRaven**, or **two
 
 ---
 
-## 1. New vehicle: `ArduRocket/` (~14 files)
+## 1. New vehicle: `ArduRocket/` (19 files)
 
 Scaffolding from **Blimp** (the only modern minimal vehicle); control objects from **Copter**.
 Waf auto-discovers vehicle folders and derives `-DAPM_BUILD_DIRECTORY=APM_BUILD_ArduRocket` from the
