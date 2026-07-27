@@ -6,14 +6,16 @@
 > simulated flight**:
 >
 > ```
-> PREP -> FINCHECK -> ARMED -> BOOST -> COAST -> DESCENT -> PREP
-> fin travel:  0us      0us      0us    4us    400us    stop     0us
->                                ignition ..... burnout ..... apogee
+> PREP -> FINCHECK -> ARMED -> BOOST -> COAST -> DESCENT -> LANDED -> (manual disarm) -> PREP
+> fin travel:  0us      0us      0us    4us    400us    stop      stop
+>                                ignition ..... burnout ..... apogee ..... touchdown
 > ```
 >
 > Verified: fins centred when disarmed, quiet on the rail (integrator gating),
 > live under boost, **still steering through coast after burnout**, and stopped at
-> apogee followed by auto-disarm. ArduPlane still builds clean with QROCKET removed.
+> apogee. The vehicle then stays ARMED through descent and touchdown -- disarm is a
+> manual operator action after recovery, not automatic. ArduPlane still builds clean
+> with QROCKET removed.
 >
 > **NOT verified — required before any real motor:**
 > - **`ATC_*` gains are the day-one placeholders, never tuned.** `MOT_Q_REF` has been
@@ -303,7 +305,7 @@ directory name (`Tools/ardupilotwaf/ardupilotwaf.py:136`) — no build registrat
 | `system.cpp` | `init_ardupilot()`, `allocate_motors()`, **`ahrs_view = ahrs.create_view(ROTATION_PITCH_90);`** ← the key trick, and **`ahrs.init()` + `ins.init(scheduler.get_loop_rate_hz())`** — mandatory; without the IMU init the main loop blocks forever in `wait_for_sample()` and the vehicle never runs. | `ArduCopter/system.cpp:358-431`, `Blimp::startup_INS_ground()` |
 | `rocket_control.cpp` | The whole flight controller (§3). ~150 lines. Replaces the entire `mode*.cpp` family. | `ArduCopter/mode_stabilize.cpp:9-60` (spool-state switch) |
 | `AP_Arming_Rocket.h/.cpp` | `arm()` must reset the stage detector AND propagate the armed state: `hal.util->set_soft_armed(true)`, `motors->armed(true)`, logger/notify, and `ahrs.resetHeightDatum()` when there is no home (there never is — no GPS). Omitting the propagation leaves the stage machine stuck in PREP. Also overrides `rc_calibration_checks() → true` (no RC) and enforces vertical-and-still on the rail. | `Blimp/AP_Arming_Blimp.*` |
-| `GCS_Rocket.*`, `GCS_MAVLink_Rocket.*` | Required — `GCS::create_gcs_mavlink_backend()` is pure virtual under `HAL_GCS_ENABLED`. `frame_type()` → `MAV_TYPE_GENERIC` (no upstream `MAV_TYPE_ROCKET`). `custom_mode()` → flight stage. `base_mode()` must OR in `MAV_MODE_FLAG_SAFETY_ARMED` or every GCS shows the vehicle disarmed while it is live. Overrides `handle_command_int_packet()` to catch `MAV_CMD_DO_AUX_FUNCTION` (func 300) for the fin check (§3b), with `MAV_CMD_DO_MOTOR_TEST` as a fallback. Overrides `send_attitude()` (view frame), `send_global_position_int()` and — via `try_send_message()` because `send_vfr_hud()` is not virtual — `MSG_VFR_HUD`, so that **all three** heading fields carry the magnetometer heading from `rocket_heading_rad()` instead of the EKF's meaningless nose-up yaw. **Must also override `try_send_message()`** to consume `MSG_WIND`: the stream tables are shared across all vehicles and every other vehicle implements it, so omitting it kills the vehicle in SITL and floods the link on hardware the moment a GCS requests all streams. | `Blimp/GCS_*` |
+| `GCS_Rocket.*`, `GCS_MAVLink_Rocket.*` | Required — `GCS::create_gcs_mavlink_backend()` is pure virtual under `HAL_GCS_ENABLED`. `frame_type()` → `MAV_TYPE_GENERIC` (no upstream `MAV_TYPE_ROCKET`). `custom_mode()` → flight stage. `base_mode()` must OR in `MAV_MODE_FLAG_SAFETY_ARMED` or every GCS shows the vehicle disarmed while it is live. Overrides `handle_command_int_packet()` to catch `MAV_CMD_DO_AUX_FUNCTION` (func 300) for the fin check (§3b), with `MAV_CMD_DO_MOTOR_TEST` as a fallback. Overrides `send_attitude()` (view frame), `send_global_position_int()` and — via `try_send_message()` because `send_vfr_hud()` is not virtual — `MSG_VFR_HUD`, so that **all three** heading fields carry the magnetometer heading from `rocket_heading_rad()` instead of the EKF's meaningless nose-up yaw. **Must also override `try_send_message()`** to consume `MSG_WIND`: the stream tables are shared across all vehicles and every other vehicle implements it, so omitting it kills the vehicle in SITL and floods the link on hardware the moment a GCS requests all streams. Overrides `landed_state()` (EXTENDED_SYS_STATE) → IN_AIR only for BOOST/COAST/DESCENT, ON_GROUND otherwise; without it the GCS shows "Flying" whenever armed, which — since the vehicle stays armed from rail through touchdown — means it never stops saying "Flying" after landing (or before launch on the rail). `vehicle_system_status()` **must agree**: it reports `MAV_STATE_ACTIVE` only when airborne (same three stages), not merely when armed — reporting ACTIVE on the ground while `landed_state()` says ON_GROUND makes the GCS flicker between "armed" and "flying". | `Blimp/GCS_*` |
 | `Log.cpp` | `RKT` message: stage, tilt error, fin commands, spin rate, body-up accel, dynamic pressure. | `Blimp/Log.cpp` |
 | `RC_Channel_Rocket.h/.cpp` | **(added during implementation, not in original plan)** A minimal `RC_Channels` subclass. The vehicle has no receiver, but shared code (`AP_CRSF_Telem::queue_message`, reached from `GCS::send_text`) dereferences the `rc()` singleton unconditionally, so the object must exist or the process segfaults on the first status text. | `Blimp/RC_Channel_Blimp.*` |
 
@@ -335,8 +337,17 @@ BOOST   -> launch detected. Full fin authority, gain-scheduled on q.
 COAST   -> burnout detected. Burnout is RECORDED ONLY -- no control change. Fins keep steering,
            because aerodynamic fins still have airflow while the rocket is ascending.
 DESCENT -> apogee reached (vertical velocity negative). Stop ALL fin activity; do not steer on the
-           way down.
+           way down. Announces apogee altitude to the GCS. STAYS ARMED.
+LANDED  -> touchdown detected (vertical speed settled to ~zero and held, debounced -- NOT altitude,
+           since it may drift under chute onto a hill or ditch).
+           Announces "landed" to the GCS. Terminal and STILL ARMED: the vehicle waits here until the
+           operator disarms after recovery. Nothing auto-disarms.
 ```
+
+**Disarm is manual, by design.** The flight computer never disarms itself -- not at apogee, not at
+touchdown. It stays armed (controller shut down, fins centered) the whole way down so it keeps logging
+and reporting, and the operator disarms once the rocket is recovered. Pyro/chute deployment is off-board
+on a dedicated altimeter (§0), so nothing here depends on the disarm.
 
 Key points, per the airframe owner:
 
@@ -382,6 +393,29 @@ mislabelled, buried "Motor Test" panel. A QGC custom-action file
 (`Tools/ArduRocket/qgc/ArduRocket.json`) adds a one-tap button literally labelled
 **"Fin Check"**. DO_MOTOR_TEST is still accepted as a fallback for ground stations
 without the custom button.
+
+**Installing the action file in QGC Daily (Windows 11) -- the procedure that actually
+works.** The upstream QGC docs say action files auto-load from a `MavlinkActions` folder
+and there is no UI for it; that was NOT true for the Daily build tested -- it has a
+browse field and the file must be selected there. Steps that worked:
+
+1. Copy `Tools/ArduRocket/qgc/ArduRocket.json` into the QGC save directory's
+   `MavlinkActions` folder. QGC's save dir is shown in Application Settings and, with
+   OneDrive redirecting `Documents`, was:
+   `C:\Users\<user>\OneDrive\Documents\QGroundControl Daily\MavlinkActions\`.
+2. In QGC, click the **QGC logo (top-left)** to open Settings.
+3. Open **Fly View Settings** (labelled "Fly View" on some Daily iterations).
+4. Scroll the Fly View options to the **MAVLink Actions / Custom Action File** field.
+5. Click **Browse**, go to that `MavlinkActions` folder, and select `ArduRocket.json`.
+6. **Fully restart QGC** -- and check Task Manager for a lingering `qgroundcontrol.exe`
+   background process, which keeps the old config if not killed.
+
+Two file-level gotchas that silently make QGC ignore the file:
+- It **must** contain `"fileType": "MavlinkActions"`.
+- It must contain **only** the documented keys. QGC validates against a fixed schema
+  and rejects the whole file if it sees an unexpected key (e.g. a top-level `comment`).
+  Keep it to `fileType`, `version`, and `actions` with `label`/`description`/`mavCmd`/
+  `compId`/`param1`/`param2`.
 
 ### What the fin check DOES NOT do
 
@@ -616,7 +650,7 @@ Things that look broken in the GCS but are correct:
 | Roll/pitch read as tilt, not body angles | `ATTITUDE` is reported in the rotated view, so the artificial horizon reads "am I vertical" rather than raw body Euler angles. Deliberate — see the heading section near the top. `ATTITUDE_QUATERNION` still carries true body attitude. |
 | Heading is steady and points north | Taken straight off the magnetometer, not the EKF (whose yaw is meaningless nose-up). Verified 357.3° against a 353° truth, 12° peak-to-peak. The compass is NOT in the flight solution (`COMPASS_USE=0`). |
 | `GLOBAL_POSITION_INT` lat/lon = 0 | No horizontal fix in the EKF, by design. **Its `relative_alt` IS valid** — verified −0.232 m on the pad. For *position*, read `GPS_RAW_INT`. |
-| Mode is a bare number 0–5 | `send_available_mode()` returns 0. PREP/FINCHECK/ARMED/BOOST/COAST/DESCENT. Any mode-change control does nothing: `set_mode()` refuses everything by design. |
+| Mode is a bare number 0–6 | `send_available_mode()` returns 0. PREP/FINCHECK/ARMED/BOOST/COAST/DESCENT/LANDED. Any mode-change control does nothing: `set_mode()` refuses everything by design. |
 
 Worth watching:
 - **`TILT`** (`NAMED_VALUE_FLOAT`, 5 Hz) — angle from vertical, the same number the arming
@@ -897,6 +931,47 @@ the base class tailsitter ground handling. It covers exactly the phase where q i
 zero and the fins have no authority. Default 72 in (1.8288 m). Rail exit target is
 50 fps (15.24 m/s), per NAR/Tripoli.
 
+### Flight-event narration (SITL console)
+
+The sim `::printf`s the flight's milestones to the SITL console (stdout) -- NOT MAVLink,
+so these appear in the terminal running `bin/rocket`, not in the ground station:
+
+```
+Rocket: ignition
+Rocket: off the rail at 23.2 m/s (76 fps), q=311 Pa
+Rocket: burnout
+Rocket: apogee at 3900 m (12795 ft)
+Rocket: landed - ballistic descent 120 m/s (no recovery modelled)
+```
+
+`apogee` prints the tracked peak altitude; `landed` reports the impact speed and flags
+that the sim has **no recovery model** -- the descent is ballistic, so the number is
+what a parachute would have to bleed off, not a real landing speed.
+
+The sim flies the descent to the ground because `on_rail` latches off once `left_rail`
+is set: without that, a disarm (which resets the sim's `ignited` flag) would re-satisfy
+the on-rail clamp and freeze the airframe. Since the firmware now stays armed all the
+way down (§3), the disarm only happens later -- manually, on the ground -- but the latch
+still correctly stops that from re-railing a landed vehicle.
+
+The firmware narrates the flight to the ground station too (so it shows in QGC on real
+hardware, not just the SITL console). `set_stage()` sends a plain-language callout on
+each key transition, matching the console vocabulary rather than only the terse stage
+name (QGC was showing "COAST" for burnout, which is easy to miss):
+- **Liftoff**: `Rocket: liftoff`, on ->BOOST.
+- **Burnout**: `Rocket: burnout`, on ->COAST.
+- **Apogee**: `Rocket: apogee at X m`, on ->DESCENT (the edge IS apogee -- climb rate
+  went negative). Height is launch-referenced.
+- **Landing**: `Rocket: landed - disarm when recovered`, on ->LANDED, when vertical
+  speed has settled to ~zero and held (debounced). Keyed on speed, NOT altitude -- the
+  rocket drifts under chute and may land on a hill or in a ditch, so its resting baro
+  altitude need not match the pad, but its vertical speed at rest is zero wherever it
+  comes down. The vehicle stays ARMED; the message reminds the operator to disarm.
+
+The SITL-console `landed` line is separate -- it narrates the sim's *ballistic* impact
+speed (no chute modelled), whereas the firmware LANDED is a settled-on-the-ground
+detection.
+
 ### Gain scheduling reference — MOT_Q_REF = 600, by measurement
 
 `MOT_Q_REF` sets the maximum control moment the mixer will command, because the fin
@@ -961,10 +1036,11 @@ from; it makes the extraction deterministic and repeatable.
 ## 10. Verification
 
 **SITL — status:**
-1. ✅ Full stage sequence `PREP → ARMED → BOOST → COAST → DESCENT → PREP`.
+1. ✅ Full stage sequence `PREP → ARMED → BOOST → COAST → DESCENT → LANDED`, then manual disarm → PREP.
 2. ✅ Launch detection with debounce.
 3. ✅ Burnout recorded **without** stopping the fins (400us travel during COAST).
-4. ✅ Apogee stops the fins and auto-disarms.
+4. ✅ Apogee stops the fins (announced to GCS). Vehicle stays ARMED; touchdown detected and announced;
+   disarm is manual.
 5. ⬜ **Gain tuning — not done.** Coast deflection reached ~400us of a ±500us range
    (~80% of full travel), i.e. close to saturation. Tune `MOT_Q_REF`, `MOT_GAIN_MAX`
    and the `ATC_*` gains before flying.

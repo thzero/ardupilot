@@ -18,6 +18,7 @@ const char *ArduRocket::stage_string() const
     case FlightStage::BOOST:    return "BOOST";
     case FlightStage::COAST:    return "COAST";
     case FlightStage::DESCENT:  return "DESCENT";
+    case FlightStage::LANDED:   return "LANDED";
     }
     return "?";
 }
@@ -37,6 +38,15 @@ const char *ArduRocket::stage_string() const
 #define FIN_CHECK_CENTRE_MS  300u   // settle between fins
 #define FIN_CHECK_PER_FIN_MS (2 * FIN_CHECK_PHASE_MS + FIN_CHECK_CENTRE_MS)
 #define FIN_CHECK_TOTAL_MS   (AP_FIN_MIXER_ROCKET_NUM_FINS * FIN_CHECK_PER_FIN_MS)
+
+// Touchdown detection (DESCENT -> LANDED). Keyed on vertical speed settling to ~zero
+// and STAYING there, NOT on altitude: the rocket drifts under its chute and can land on
+// a hill or in a ditch, so its resting baro altitude need not match the pad. Vertical
+// speed at rest is zero wherever it comes down. The long hold is well past the brief
+// zero-crossing at apogee, so only a real stop qualifies. Announce only; the vehicle
+// stays armed until a manual disarm.
+#define RKT_LAND_RATE_MS  0.5f      // vertical speed treated as "at rest", m/s
+#define RKT_LAND_MS       3000u     // must hold this long
 
 void ArduRocket::start_fin_check(bool on_rail)
 {
@@ -194,6 +204,35 @@ void ArduRocket::set_stage(FlightStage new_stage)
     }
     stage = new_stage;
     gcs().send_text(MAV_SEVERITY_INFO, "Rocket: %s", stage_string());
+
+    /*
+      Plain-language callouts for the key flight events, so the ground station narrates
+      the flight the same way the SITL console does -- liftoff / burnout / apogee /
+      landed -- instead of only the terse stage name (e.g. "COAST" for burnout, which is
+      easy to miss). Firmware-side, so these reach QGC on real hardware, not only SITL.
+     */
+    switch (new_stage) {
+    case FlightStage::BOOST:
+        gcs().send_text(MAV_SEVERITY_NOTICE, "Rocket: liftoff");
+        break;
+    case FlightStage::COAST:
+        gcs().send_text(MAV_SEVERITY_NOTICE, "Rocket: burnout");
+        break;
+    case FlightStage::DESCENT:
+        // this edge IS apogee (climb rate went negative). Baro altitude is launch-
+        // referenced (height datum zeroed at arm), so it is height above the pad.
+        gcs().send_text(MAV_SEVERITY_NOTICE, "Rocket: apogee at %.0f m",
+                        (double)barometer.get_altitude());
+        break;
+    case FlightStage::LANDED:
+        // Stays armed by design -- remind the operator that disarm is now their job.
+        gcs().send_text(MAV_SEVERITY_NOTICE, "Rocket: landed - disarm when recovered");
+        break;
+    case FlightStage::PREP:
+    case FlightStage::FINCHECK:
+    case FlightStage::ARMED:
+        break;   // the stage name above is enough for these
+    }
 }
 
 /*
@@ -275,7 +314,10 @@ void ArduRocket::run_rocket_control()
         // stale confirmation cannot be used to arm.
         update_fin_check_validity();
         set_stage(FlightStage::PREP);
-    } else {
+    } else if (stage != FlightStage::LANDED) {
+        // LANDED is terminal until a manual disarm. The ascent detector only knows
+        // stages up to DESCENT, so once we have declared touchdown do not let it map
+        // the stage back to DESCENT.
         switch (rkt.stage()) {
         case AP_Rocket::Stage::PRE_LAUNCH:
             set_stage(FlightStage::ARMED);
@@ -375,18 +417,48 @@ void ArduRocket::run_rocket_control()
         break;
     }
 
-    case FlightStage::DESCENT:
+    case FlightStage::DESCENT: {
         /*
           Apogee is behind us: the rocket is falling, there is no upward airflow to
-          steer with, and nothing should flail on the way down. Shut down, centre the
-          fins, and disarm. Recovery (pyro, altimeter) is deliberately not this
-          controller's job.
+          steer with, and nothing should flail on the way down. Shut the controller
+          down and centre the fins. Recovery (pyro, chute) is deliberately not this
+          controller's job -- it runs on a dedicated altimeter.
+
+          The vehicle stays ARMED. Disarm is a manual operator action after recovery,
+          not automatic, so the flight computer keeps logging and reporting the whole
+          way down. We watch for touchdown only to ANNOUNCE it (the LANDED stage);
+          nothing here disarms.
          */
         motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::SHUT_DOWN);
         attitude_control->reset_rate_controller_I_terms();
-        if (motors->armed()) {
-            arming.disarm(AP_Arming::Method::LANDED);
+
+        // Touchdown: no longer moving vertically, held for a debounce so a momentary
+        // reading cannot fake it. Deliberately NOT gated on altitude -- the rocket
+        // drifts under its chute and may land on a hill or in a ditch, where the
+        // resting baro altitude differs from the pad; the vertical SPEED is zero at
+        // rest regardless of terrain. climb_rate_ms is the same EKF estimate apogee
+        // rides on. No GPS needed.
+        const bool at_rest = fabsf(climb_rate_ms) < RKT_LAND_RATE_MS;
+        if (at_rest) {
+            if (land_start_ms == 0) {
+                land_start_ms = AP_HAL::millis();
+            } else if (AP_HAL::millis() - land_start_ms > RKT_LAND_MS) {
+                set_stage(FlightStage::LANDED);
+            }
+        } else {
+            land_start_ms = 0;
         }
+        break;
+    }
+
+    case FlightStage::LANDED:
+        /*
+          On the ground after the descent. Controller down, fins centred. Terminal:
+          the vehicle waits here, still ARMED, until the operator disarms after
+          recovery. Nothing auto-disarms.
+         */
+        motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::SHUT_DOWN);
+        attitude_control->reset_rate_controller_I_terms();
         break;
     }
 

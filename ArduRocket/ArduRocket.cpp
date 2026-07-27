@@ -188,6 +188,7 @@ ArduRocket::ArduRocket(void)
       fin_check_valid_ms(0),
       fin_check_start_ms(0),
       fin_check_on_rail(false),
+      land_start_ms(0),
       dynamic_pressure_pa(0.0f),
       param_loader(var_info),
       initialised(false)

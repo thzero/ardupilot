@@ -41,5 +41,9 @@ enum class FlightStage : uint8_t {
     BOOST    = 3,  // launch detected, motor burning. Full fin authority.
     COAST    = 4,  // burnout recorded, still ascending. Fins KEEP steering (aero fins
                    // still have airflow). Burnout drives no control change here.
-    DESCENT  = 5,  // apogee passed (climb rate negative). Steering ceases; fins centered.
+    DESCENT  = 5,  // apogee passed (climb rate negative). Steering ceases, fins
+                   // centered. Stays ARMED -- disarm is a manual operator action.
+    LANDED   = 6,  // touchdown detected during descent. Controller down, fins centered.
+                   // Terminal: the vehicle waits here, still ARMED, until the operator
+                   // disarms after recovery. Nothing here auto-disarms.
 };

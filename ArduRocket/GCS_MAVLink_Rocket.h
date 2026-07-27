@@ -59,6 +59,9 @@ private:
 
     uint8_t base_mode() const override;
     MAV_STATE vehicle_system_status() const override;
+    // Ground/air state for EXTENDED_SYS_STATE, so the GCS stops showing "Flying" once
+    // the rocket is down (it stays ARMED by design, so armed-state alone is not enough).
+    MAV_LANDED_STATE landed_state() const override;
 
     float vfr_hud_airspeed() const override;
     int16_t vfr_hud_throttle() const override;

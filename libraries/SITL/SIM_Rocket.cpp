@@ -365,8 +365,12 @@ void Rocket::update(const struct sitl_input &input)
     if (!ignited) {
         rail_start_pos = position;
     }
-    const bool on_rail = !ignited ||
-                         ((position - rail_start_pos).length() < rail_length_m);
+    // Once the airframe has left the rail, the rail can never constrain it again --
+    // latch on left_rail. Without this, the disarm at apogee resets `ignited` to false,
+    // which would re-satisfy the `!ignited` term and freeze the airframe at apogee
+    // instead of letting it fall, so it would never land.
+    const bool on_rail = !left_rail &&
+                         (!ignited || ((position - rail_start_pos).length() < rail_length_m));
     if (on_rail) {
         dcm = rail_dcm;
         gyro.zero();
@@ -392,6 +396,29 @@ void Rocket::update(const struct sitl_input &input)
         ::printf("Rocket: off the rail at %.1f m/s (%.0f fps), q=%.0f Pa%s\n",
                  (double)mps, (double)fps, (double)q_exit,
                  fps < RAIL_EXIT_TARGET_FPS ? "   *** BELOW 50 fps TARGET ***" : "");
+    }
+
+    /*
+      Apogee and landing narration, in the same style as the ignition / off-the-rail /
+      burnout notes. Altitude is height above the launch point (NED z is down, so
+      alt = -position.z; climbing is negative velocity.z).
+     */
+    const float alt_m = -position.z;
+    if (alt_m > max_alt_m) {
+        max_alt_m = alt_m;
+    }
+    if (left_rail && !apogee_reported && velocity_ef.z > 0.0f && alt_m > 1.0f) {
+        // vertical velocity has turned downward: the climb is over
+        apogee_reported = true;
+        ::printf("Rocket: apogee at %.0f m (%.0f ft)\n",
+                 (double)max_alt_m, (double)(max_alt_m * 3.28084f));
+    }
+    if (apogee_reported && !landed_reported && alt_m < 1.0f) {
+        // Back on the ground. The sim has no recovery model, so this is a ballistic
+        // impact -- the speed is what a parachute would have had to bleed off.
+        landed_reported = true;
+        ::printf("Rocket: landed - ballistic descent %.0f m/s (no recovery modelled)\n",
+                 (double)velocity_ef.length());
     }
 
     update_position();

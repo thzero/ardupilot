@@ -82,7 +82,7 @@ bool AP_Arming_Rocket::pre_arm_checks(bool display_failure)
       ArduRocket.h for the operator flow. The arm press itself is the attestation.
      */
     if (!rocket.fin_check_ok()) {
-        check_failed(display_failure, "fin check required (run it on the rail)");
+        check_failed(display_failure, "Fin Check required (Run it on the rail)");
         return false;
     }
 

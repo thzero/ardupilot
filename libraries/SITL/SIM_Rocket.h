@@ -194,6 +194,13 @@ private:
     bool ignited;
     bool left_rail = false;
     Vector3d rail_start_pos;
+
+    // Flight-event narration to the SITL console (apogee, landing), matching the
+    // ignition / off-the-rail / burnout notes. Report-once latches, plus the peak
+    // altitude so apogee prints the true maximum rather than the first step past it.
+    bool  apogee_reported = false;
+    bool  landed_reported = false;
+    float max_alt_m       = 0.0f;
 };
 
 } // namespace SITL

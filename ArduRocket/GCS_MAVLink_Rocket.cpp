@@ -46,14 +46,51 @@ MAV_STATE GCS_MAVLINK_Rocket::vehicle_system_status() const
     if (AP_BoardConfig::in_config_error()) {
         return MAV_STATE_CRITICAL;
     }
-    if (rocket.stage == FlightStage::COAST) {
-        // burnt out: the controller is shut down and the airframe is ballistic
-        return MAV_STATE_STANDBY;
-    }
-    if (rocket.motors != nullptr && rocket.motors->armed()) {
+    /*
+      Report ACTIVE only while actually airborne, and MUST agree with landed_state()
+      below. The vehicle stays ARMED from the rail through touchdown, so keying this on
+      the armed flag would report ACTIVE on the ground -- which contradicts
+      landed_state()=ON_GROUND and makes the ground station flicker between "armed" and
+      "flying" after landing. Airborne = BOOST/COAST/DESCENT; everything else (on the
+      rail, or landed) is STANDBY.
+     */
+    switch (rocket.stage) {
+    case FlightStage::BOOST:
+    case FlightStage::COAST:
+    case FlightStage::DESCENT:
         return MAV_STATE_ACTIVE;
+    case FlightStage::PREP:
+    case FlightStage::FINCHECK:
+    case FlightStage::ARMED:
+    case FlightStage::LANDED:
+        break;
     }
     return MAV_STATE_STANDBY;
+}
+
+/*
+  Ground-vs-air state for EXTENDED_SYS_STATE.
+
+  The ground station's "Flying" indicator keys off this. The vehicle stays ARMED from
+  the rail all the way through touchdown (disarm is manual), so reporting flight from
+  the armed flag alone would leave the GCS saying "Flying" on the ground both before
+  launch and after landing. Drive it from the flight stage instead: only BOOST, COAST
+  and DESCENT are actually airborne.
+ */
+MAV_LANDED_STATE GCS_MAVLINK_Rocket::landed_state() const
+{
+    switch (rocket.stage) {
+    case FlightStage::PREP:
+    case FlightStage::FINCHECK:
+    case FlightStage::ARMED:      // armed on the rail, but not yet launched
+    case FlightStage::LANDED:
+        return MAV_LANDED_STATE_ON_GROUND;
+    case FlightStage::BOOST:
+    case FlightStage::COAST:
+    case FlightStage::DESCENT:
+        return MAV_LANDED_STATE_IN_AIR;
+    }
+    return MAV_LANDED_STATE_UNDEFINED;
 }
 
 void GCS_MAVLINK_Rocket::send_nav_controller_output() const
@@ -127,6 +164,7 @@ uint8_t GCS_MAVLINK_Rocket::send_available_mode(uint8_t index) const
         { FlightStage::BOOST,    "Boost" },
         { FlightStage::COAST,    "Coast" },
         { FlightStage::DESCENT,  "Descent" },
+        { FlightStage::LANDED,   "Landed" },
     };
     const uint8_t mode_count = ARRAY_SIZE(modes);
 
