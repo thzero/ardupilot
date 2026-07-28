@@ -131,7 +131,7 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
 
     // @Param: RKT_MIN_Q
     // @DisplayName: Dynamic pressure below which fins stop being driven
-    // @Description: Fin force scales with dynamic pressure, so below some value the fins cannot produce a useful moment however far they deflect. Below this threshold the controller stops driving them and centres them, rather than saturating against a plant that cannot respond. This matters approaching apogee, where the gain scheduling would otherwise command near-full deflection to no effect. Set 0 to keep steering all the way to apogee.
+    // @Description: Fin force scales with dynamic pressure, so below some value the fins cannot produce a useful moment however far they deflect. Below this threshold the controller stops driving them and centers them, rather than saturating against a plant that cannot respond. This matters approaching apogee, where the gain scheduling would otherwise command near-full deflection to no effect. Set 0 to keep steering all the way to apogee.
     // @Units: Pa
     // @Range: 0 500
     // @User: Standard

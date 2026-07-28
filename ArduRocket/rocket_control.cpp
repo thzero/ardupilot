@@ -1,6 +1,19 @@
 #include "ArduRocket.h"
 
 /*
+  Local (console) debug narration -- SITL ONLY. In SITL the firmware's hal.console is
+  the MAVLink TCP port, not the terminal, so plain ::printf (stdout) is what lands in
+  the same place the simulator prints ignition / burnout / apogee. Compiles to nothing
+  on real hardware, where the ground-station STATUSTEXT messages are the feedback.
+ */
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+ #include <cstdio>
+ #define RKT_LOCAL_DEBUG(fmt, ...) ::printf("Rocket: " fmt "\n", ##__VA_ARGS__)
+#else
+ #define RKT_LOCAL_DEBUG(fmt, ...) do {} while (0)
+#endif
+
+/*
   The ArduRocket flight controller.
 
   This one file replaces the mode*.cpp family of every other vehicle, because
@@ -26,7 +39,7 @@ const char *ArduRocket::stage_string() const
 /*
   Pre-arm fin check sequence.
 
-  Each fin in turn: full one way, full the other, then centre -- announced as it
+  Each fin in turn: full one way, full the other, then center -- announced as it
   starts, so the pad crew can confirm that the fin which moves is the fin that was
   named (catching a swapped output channel) and that it moves the expected way
   (catching a reversed servo or a backwards linkage). Neither of those is
@@ -34,9 +47,15 @@ const char *ArduRocket::stage_string() const
 
   The vehicle is NOT armed while this runs.
  */
-#define FIN_CHECK_PHASE_MS   500u   // per deflection
-#define FIN_CHECK_CENTRE_MS  300u   // settle between fins
-#define FIN_CHECK_PER_FIN_MS (2 * FIN_CHECK_PHASE_MS + FIN_CHECK_CENTRE_MS)
+// Each fin: full one way, full the other, then center -- every position held long
+// enough for the operator to watch the fin actually reach it. 1.5 s each: the throw
+// announcement takes a few tenths of a second to reach and render in the ground
+// station, so a shorter hold means the fin has already moved on by the time the
+// operator reads it. This leaves ~1 s of visible hold after the message lands. Center
+// gets the same hold so it is clearly seen before moving to the next fin.
+#define FIN_CHECK_PHASE_MS   1500u  // hold each throw this long
+#define FIN_CHECK_CENTER_MS  1500u  // hold at center this long, before the next fin
+#define FIN_CHECK_PER_FIN_MS (2 * FIN_CHECK_PHASE_MS + FIN_CHECK_CENTER_MS)
 #define FIN_CHECK_TOTAL_MS   (AP_FIN_MIXER_ROCKET_NUM_FINS * FIN_CHECK_PER_FIN_MS)
 
 // Touchdown detection (DESCENT -> LANDED). Keyed on vertical speed settling to ~zero
@@ -55,6 +74,7 @@ void ArduRocket::start_fin_check(bool on_rail)
     set_stage(FlightStage::FINCHECK);
     gcs().send_text(MAV_SEVERITY_WARNING, "Rocket: FIN CHECK%s - watch the fins",
                     on_rail ? "" : " (bench, will NOT arm)");
+    RKT_LOCAL_DEBUG("fin test: starting%s", on_rail ? " on the rail" : " (bench)");
 }
 
 /*
@@ -122,10 +142,12 @@ void ArduRocket::run_fin_check()
     const uint32_t elapsed = AP_HAL::millis() - fin_check_start_ms;
 
     if (elapsed >= FIN_CHECK_TOTAL_MS) {
-        // sequence complete: centre the fins and return to PREP
+        // sequence complete: center the fins and return to PREP
         motors->set_fin_test(-1, 0.0f);
         fin_check_start_ms = 0;
         set_stage(FlightStage::PREP);
+        RKT_LOCAL_DEBUG("fin test: complete (%s)",
+                        fin_check_on_rail ? "on rail - gate latched" : "bench");
 
         if (fin_check_on_rail) {
             // On the rail: latch the gate so ARM becomes a single clean press.
@@ -137,7 +159,7 @@ void ArduRocket::run_fin_check()
             fin_check_valid = true;
             fin_check_valid_ms = AP_HAL::millis();
             gcs().send_text(MAV_SEVERITY_WARNING,
-                            "Rocket: fin check done - if fins moved right, ARM");
+                            "Rocket: fin check done - ARM for flight");
         } else {
             // Bench run: verified the fins but does NOT satisfy the arming gate.
             gcs().send_text(MAV_SEVERITY_INFO,
@@ -149,20 +171,42 @@ void ArduRocket::run_fin_check()
     const uint8_t fin = elapsed / FIN_CHECK_PER_FIN_MS;
     const uint32_t in_fin = elapsed % FIN_CHECK_PER_FIN_MS;
 
-    // announce each fin as it starts moving
-    static uint8_t announced = 0xFF;
-    if (announced != fin) {
-        announced = fin;
-        gcs().send_text(MAV_SEVERITY_INFO, "Rocket: fin %u", (unsigned)(fin + 1));
-    }
-
+    // Three phases per fin: full one way, full the other, then center. Phase tracked as
+    // an int (the build forbids == on floats).
+    uint8_t phase;
     float deflection;
     if (in_fin < FIN_CHECK_PHASE_MS) {
-        deflection = 1.0f;
+        phase = 0; deflection = 1.0f;
     } else if (in_fin < 2 * FIN_CHECK_PHASE_MS) {
-        deflection = -1.0f;
+        phase = 1; deflection = -1.0f;
     } else {
-        deflection = 0.0f;
+        phase = 2; deflection = 0.0f;
+    }
+
+    // GROUND STATION: announce ONCE PER FIN. The GCS throttles its on-screen
+    // notifications (a queued toaster with a minimum display time), so announcing every
+    // throw -- 12 messages -- makes the display fall seconds behind the actual movement.
+    // The firmware sends them in real time; it is the GCS display that lags. One message
+    // per fin keeps the GCS in step with the fin the operator is watching, which visibly
+    // does all three throws. WARNING severity so it surfaces (INFO gets buried).
+    static uint8_t announced_fin = 0xFF;
+    if (fin != announced_fin) {
+        announced_fin = fin;
+        gcs().send_text(MAV_SEVERITY_WARNING, "Rocket: testing fin %u",
+                        (unsigned)(fin + 1));
+    }
+
+    // LOCAL CONSOLE: the throw-by-throw detail, in real time and unthrottled, for SITL
+    // where there is no physical fin to watch. The command is +/-full throw; the physical
+    // angle is whatever the servo endpoints (SERVOn_MIN/MAX) are -- watch SERVO_OUTPUT_RAW
+    // for the actual PWM.
+    static uint8_t dbg_phase = 0xFF;
+    static uint8_t dbg_fin = 0xFF;
+    if (phase != dbg_phase || fin != dbg_fin) {
+        dbg_phase = phase;
+        dbg_fin = fin;
+        RKT_LOCAL_DEBUG("fin test: fin %u -> %s", (unsigned)(fin + 1),
+                        phase == 0 ? "+100%" : phase == 1 ? "-100%" : "center");
     }
 
     motors->set_fin_test(fin, deflection);
@@ -421,7 +465,7 @@ void ArduRocket::run_rocket_control()
         /*
           Apogee is behind us: the rocket is falling, there is no upward airflow to
           steer with, and nothing should flail on the way down. Shut the controller
-          down and centre the fins. Recovery (pyro, chute) is deliberately not this
+          down and center the fins. Recovery (pyro, chute) is deliberately not this
           controller's job -- it runs on a dedicated altimeter.
 
           The vehicle stays ARMED. Disarm is a manual operator action after recovery,
@@ -453,7 +497,7 @@ void ArduRocket::run_rocket_control()
 
     case FlightStage::LANDED:
         /*
-          On the ground after the descent. Controller down, fins centred. Terminal:
+          On the ground after the descent. Controller down, fins centered. Terminal:
           the vehicle waits here, still ARMED, until the operator disarms after
           recovery. Nothing auto-disarms.
          */

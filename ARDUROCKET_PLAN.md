@@ -371,7 +371,7 @@ Arming is a **single ARM press, gated on a separately-triggered fin check**:
 Fin Check  -> GCS "Fin Check" button (MAV_CMD_DO_AUX_FUNCTION, param1 = 300)
            -> FINCHECK stage: fins wiggle one at a time, each announced
            -> on the rail (vertical & still) this LATCHES fin_check_valid
-           -> returns to PREP. "Rocket: fin check done - if fins moved right, ARM"
+           -> returns to PREP. "Rocket: fin check done - if fins moved correctly, ARM"
               (NOT "OK": the code cannot see the fins, only that the wiggle ran; the
               verdict is the operator's, recorded by the ARM press below)
 ARM        -> single press. Pre-arm requires fin_check_valid, so until the check
@@ -441,7 +441,7 @@ Therefore the following are **NOT** detected, and will arm and fly:
 It refuses to let the check be skipped, and puts the fins in front of a human:
 
 - Drives **one fin at a time**, full one way, full the other, centre.
-- **Announces each fin as it starts moving** (`Rocket: fin 3`), so the crew can confirm
+- **Announces each fin** (`Rocket: testing fin 3 (+/- then center)`) as it starts its throws, so the crew can confirm
   the fin that moves is the fin that was named -- this is what makes a swapped output
   channel visible.
 - **Blocks arming** until the check has been run on the rail (pre-arm requires the
@@ -616,13 +616,24 @@ also works as a fallback (built-in Motor Test panel) for a GCS without the butto
 
 The **same** command serves bench and rail: on the rail (vertical & still) completing
 it latches the arming gate; held in the hand it just exercises the fins and announces
-`(bench, will NOT arm)`. You get `Rocket: FIN CHECK - watch the fins`, then each fin
-driven in turn and announced as `Rocket: fin N`:
+`(bench, will NOT arm)`. You get `Rocket: FIN CHECK - watch the fins`, then, **per fin**,
+`Rocket: testing fin N (+/- then center)` -- while that fin visibly does all three
+throws, each held ~1.5 s:
 
 | | |
 |---|---|
-| per fin | 500 ms one way, 500 ms the other, 300 ms centred = 1300 ms |
-| total | 4 fins × 1300 ms = **5.2 s** |
+| per fin | 1500 ms one way, 1500 ms the other, 1500 ms center = 4500 ms |
+| total | 4 fins × 4500 ms = **18 s** |
+
+**Why one GCS message per fin, not per throw.** The firmware sends STATUSTEXT in real
+time, but a ground station throttles its on-screen notifications (a queued toaster with
+a minimum display time). Announcing every throw -- 12 messages -- makes that toaster
+fall seconds behind the actual movement (you see fin 4 moving while it still shows fin
+1). One message per fin keeps the GCS in step. The **throw-by-throw** detail
+(`fin N -> +100% / -100% / center`) still goes to the **local SITL console**, which is
+real-time and unthrottled, for the case where there is no physical fin to watch. The
+1.5 s hold is also deliberately generous so the fin dwells at each position well after
+the per-fin message has rendered.
 
 Two deliberate properties:
 - It is the **identical code path** as the arming check, so what you verify on the bench
@@ -650,7 +661,7 @@ Things that look broken in the GCS but are correct:
 | Roll/pitch read as tilt, not body angles | `ATTITUDE` is reported in the rotated view, so the artificial horizon reads "am I vertical" rather than raw body Euler angles. Deliberate — see the heading section near the top. `ATTITUDE_QUATERNION` still carries true body attitude. |
 | Heading is steady and points north | Taken straight off the magnetometer, not the EKF (whose yaw is meaningless nose-up). Verified 357.3° against a 353° truth, 12° peak-to-peak. The compass is NOT in the flight solution (`COMPASS_USE=0`). |
 | `GLOBAL_POSITION_INT` lat/lon = 0 | No horizontal fix in the EKF, by design. **Its `relative_alt` IS valid** — verified −0.232 m on the pad. For *position*, read `GPS_RAW_INT`. |
-| Mode is a bare number 0–6 | `send_available_mode()` returns 0. PREP/FINCHECK/ARMED/BOOST/COAST/DESCENT/LANDED. Any mode-change control does nothing: `set_mode()` refuses everything by design. |
+| Mode shows as "unknown" / a bare number 0–6 | The stages are PREP/FINCHECK/ARMED/BOOST/COAST/DESCENT/LANDED; `set_mode()` refuses everything by design so no mode-change control does anything. **The vehicle advertises all seven by NAME** via the full standard-modes protocol (`send_available_mode()` → `AVAILABLE_MODES`, plus `AVAILABLE_MODES_MONITOR` and a matching heartbeat `custom_mode`). QGC *receives* them but does **not render** them — this is an **open QGC bug** ([qgroundcontrol#12549](https://github.com/mavlink/qgroundcontrol/issues/12549)), not a vehicle problem, and it hits PX4 custom modes too. Not fixable from firmware: reporting `MAV_AUTOPILOT_GENERIC` to dodge QGC's ArduPilot plugin would (a) likely still not render, per the same bug, and (b) disable QGC's ArduPilot param handling. Left as-is; the plain-language STATUSTEXT narration (liftoff/burnout/apogee/landed) and the flying/on-ground status carry the actual flight state. |
 
 Worth watching:
 - **`TILT`** (`NAMED_VALUE_FLOAT`, 5 Hz) — angle from vertical, the same number the arming
@@ -668,8 +679,8 @@ Pre-arm gates: **tilt within a 20° cone** of vertical, gyro < 15 °/s, all four
 assigned to `SERVO1-4_FUNCTION` = 190–193, and **the fin check latched on the rail**.
 
 1. **Tap "Fin Check"** (the QGC custom-action button, or the Motor Test panel as a
-   fallback). The 5.2 s wiggle runs — **watch each announced fin** move the direction
-   you expect. On the rail it ends with `Rocket: fin check done - if fins moved right, ARM`.
+   fallback). The 18 s wiggle runs — **watch each announced throw** move the direction
+   you expect. On the rail it ends with `Rocket: fin check done - if fins moved correctly, ARM`.
 2. **ARM.** One press → `Rocket: rail attitude X/Y deg` then `Rocket: armed, on the rail`.
 
 > Until you run the fin check, ARM stays blocked with `PreArm: fin check required (run
