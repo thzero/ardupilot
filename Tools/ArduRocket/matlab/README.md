@@ -28,6 +28,29 @@ rocket_sim
 Then arm from your ground station (TCP 5760 — a separate link from the physics
 one). Ignition follows 3 s later.
 
+## Networking (MATLAB on Windows, SITL in WSL)
+
+If MATLAB runs on Windows and SITL runs in WSL, the physics UDP link (port 9002)
+crosses the WSL↔Windows boundary — the same boundary that trips up UDP telemetry.
+Two ways to make it work:
+
+- **WSL2 mirrored networking (recommended, Windows 11).** Put this in
+  `C:\Users\<you>\.wslconfig`, then `wsl --shutdown` and reopen:
+  ```
+  [wsl2]
+  networkingMode=mirrored
+  ```
+  WSL and Windows then share `localhost` for TCP **and** UDP, so `--model JSON`
+  (default `127.0.0.1:9002`) reaches MATLAB, QGC connects to TCP `5760` on
+  localhost, and there are no IPs to juggle.
+- **Explicit IP.** Otherwise launch `--model JSON:<windows-ip>` so SITL sends the
+  servo packets to MATLAB's interface. `rocket_sim.m` already replies to the packet's
+  sender, so the return path needs no configuration.
+
+**Toolbox:** `rocket_sim.m` uses `udpport`, which is in the **Instrument Control
+Toolbox**. Without it the bridge will not run as written — a Java `DatagramSocket`
+version can replace it with no toolbox dependency (ask if you need it).
+
 | file | role |
 |---|---|
 | `rocket_sim.m` | UDP bridge + main loop + plots |
@@ -58,28 +81,23 @@ These are the things that will silently waste your afternoon:
 
 Body X points out the **nose**, so a vertical rocket has body X pointing up.
 
-## ⚠️ Two constants are not physically justified
+## ⚠️ One assumption remains: the control-tab dimensions
 
-Carried over from `SIM_Rocket.h` for parity, and worth fixing before trusting any
-gain tuned here:
+The physics that used to be wrong here have been corrected, so **do not** re-apply
+the old warnings:
+- Rate damping is now the correct `V·ω` law at a realistic magnitude
+  (`rot_damping_coeff = 0.0458`, damping ratio ≈ 0.06, in the 0.05–0.2 sounding-rocket
+  band) — **not** the old `0.35` with the `q·ω` (`V²·ω`) law.
+- Fin force is **derived from the .ork fin geometry**, not the old `0.0035` guess.
+- Drag, inertia, mass, thrust and static margin all come from the OpenRocket export.
 
-1. **`rot_damping = 0.35` is roughly 70× too large.** It gives a damping ratio of
-   7.0 at rail exit rising to 183 at Mach 1.2; real sounding rockets are 0.05–0.2.
-   At a realistic 0.2 rad/s the damping moment is **20× what the fins produce at
-   full deflection**. An airframe that can barely rotate makes any controller look
-   excellent. For ζ ≈ 0.1 at rail exit it should be ≈ **0.005**.
-
-2. **The damping law is dimensionally wrong.** Aerodynamic pitch damping goes as
-   `V·ω`; the code uses `rot_damping * q * ω`, which is `V²·ω`. That overstates
-   damping by a further ~4× at 60 m/s and ~26× at 400 m/s.
-
-Set `P.use_realistic_damping = true` in `rocket_params.m` to switch to the
-corrected law and magnitude, and see how much harder the real problem is.
-
-3. **`fin_moment_gain = 0.0035` is a guess.** It is the single constant deciding
-   whether the fins can fly the airframe, and OpenRocket does not export it.
-   Fitting it from a SITL log is **circular** — that log used this same guess. It
-   needs Barrowman geometry: `Kf ≈ Cn_delta × A_fin × moment_arm`.
+**The one number still assumed is the control-tab size.** The airframe steers with
+trailing-edge **tabs**, and the .ork's `tabheight`/`tablength` describe the
+*structural* through-the-wall mounting tab, not a control surface. So the tab chord
+(25% of fin chord), span (75% of fin span) and max deflection (20°) are assumptions,
+and `P.fin_force_gain` (currently `0.005456` N/Pa per fin) scales **linearly** with
+all three. This is the single number to update once the real tab dimensions are
+measured — until then, treat any gain tuned here as provisional.
 
 ## Not verified
 
