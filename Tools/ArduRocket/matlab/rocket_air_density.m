@@ -8,6 +8,15 @@ function rho = rocket_air_density(alt_amsl_m)
 % directly overstated control authority through the whole upper coast.
 %
 % Troposphere only (below 11 km), which covers any hobby flight.
+%
+% If the Aerospace Toolbox is installed, use its ISA model (atmosisa) -- the
+% maintained, validated implementation that also covers the higher layers. Falls back
+% to the hand-rolled troposphere model below when the toolbox is absent, so the SAME
+% rocket_sim runs either way; there is no separate "toolbox version" to keep in sync.
+if rocket_use_toolbox() && exist('atmosisa','file') == 2
+    [~,~,~,rho] = atmosisa(min(max(alt_amsl_m, -500), 84000));
+    return
+end
 
 T0   = 288.15;      % K, sea level standard temperature
 P0   = 101325.0;    % Pa, sea level standard pressure

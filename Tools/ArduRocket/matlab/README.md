@@ -53,10 +53,29 @@ version can replace it with no toolbox dependency (ask if you need it).
 
 | file | role |
 |---|---|
-| `rocket_sim.m` | UDP bridge + main loop + plots |
+| `rocket_sim.m` | UDP bridge + main loop + live/summary plots |
 | `rocket_params.m` | airframe / motor / aero constants |
 | `rocket_init.m` | initial state on the rail |
 | `rocket_step.m` | one physics timestep |
+
+## Aerospace Toolbox and Blockset
+
+**Aerospace Toolbox** — no separate version needed. The helpers `rocket_air_density`,
+`rocket_quat_to_dcm` and `rocket_quat_from_euler` **auto-detect** the toolbox and use
+`atmosisa` / `quat2dcm` / `angle2quat` when it is installed, falling back to the
+hand-rolled math when it is not. So `rocket_sim` runs identically with or without the
+toolbox; install it and the same script simply uses the validated library functions.
+Run `rocket_selftest` after installing to confirm the conventions.
+
+To **force the hand-rolled math even when the toolbox is installed** (to A/B the two, or
+keep a run reproducible): `rocket_use_toolbox(false)`. This is a pure override — the
+default is unchanged, so without it the helpers still use the toolbox whenever it is
+installed. `rocket_use_toolbox(true)` re-enables it.
+
+**Aerospace Blockset** — the Simulink version of the plant lives in `simulink/` (the
+6DOF block + reusable MATLAB Function blocks). See `simulink/README.md`. Note it is a
+scaffold: a `.slx` cannot be authored outside MATLAB, so that folder holds the function-block
+sources, a wiring guide, and a programmatic builder to assemble the model in MATLAB.
 
 ## Protocol details (verified against `libraries/SITL/SIM_JSON.{h,cpp}`)
 

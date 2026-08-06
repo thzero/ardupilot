@@ -39,7 +39,8 @@ function rocket_sim(varargin)
 p = inputParser;
 addParameter(p,'Duration',40);
 addParameter(p,'Port',9002);
-addParameter(p,'Plot',true);
+addParameter(p,'Plot',true);       % summary plot at the end of the run
+addParameter(p,'LivePlot',true);   % real-time plot updated every step
 parse(p,varargin{:});
 opt = p.Results;
 
@@ -56,6 +57,23 @@ H = struct('t',nan(N,1),'alt',nan(N,1),'vel',nan(N,1),'tilt',nan(N,1), ...
            'fin',nan(N,4),'q',nan(N,1),'mass',nan(N,1),'thrust',nan(N,1));
 k = 0;
 lastReport = 0;
+
+% Real-time plot: animated lines updated every step. No toolbox needed -- plain
+% MATLAB. `drawnow limitrate` caps the redraw so it does not slow the sim loop.
+if opt.LivePlot
+    figure('Name','ArduRocket - live flight');
+    axA = subplot(2,2,1); altLine  = animatedline(axA); grid(axA,'on');
+        ylabel(axA,'altitude (m)');
+    axT = subplot(2,2,2); tiltLine = animatedline(axT,'Color','r'); grid(axT,'on');
+        ylabel(axT,'tilt from vertical (deg)');
+    axQ = subplot(2,2,3); qLine    = animatedline(axQ); grid(axQ,'on');
+        ylabel(axQ,'dynamic pressure (Pa)'); xlabel(axQ,'t (s)');
+    axF = subplot(2,2,4);
+        finLines = [animatedline(axF,'Color','b'), animatedline(axF,'Color','r'), ...
+                    animatedline(axF,'Color',[0 .6 0]), animatedline(axF,'Color','m')];
+        grid(axF,'on'); ylabel(axF,'fin cmd (-1..1)'); xlabel(axF,'t (s)');
+        legend(axF,{'fin1','fin2','fin3','fin4'},'Location','best');
+end
 
 while S.t < opt.Duration
     dg = read(u,1,"uint8");
@@ -83,6 +101,16 @@ while S.t < opt.Duration
         H.t(k)=S.t; H.alt(k)=-S.pos_ned(3); H.vel(k)=norm(S.vel_ned);
         H.tilt(k)=S.tilt_deg; H.fin(k,:)=fin(:).'; H.q(k)=S.q;
         H.mass(k)=S.mass; H.thrust(k)=S.thrust;
+    end
+
+    if opt.LivePlot
+        addpoints(altLine,  S.t, -S.pos_ned(3));
+        addpoints(tiltLine, S.t, S.tilt_deg);
+        addpoints(qLine,    S.t, S.q);
+        for j = 1:4
+            addpoints(finLines(j), S.t, fin(j));
+        end
+        drawnow limitrate
     end
 
     if S.t - lastReport >= 1.0
