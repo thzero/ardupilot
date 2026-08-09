@@ -241,10 +241,67 @@ Key parameter groups (all visible in the GCS parameter editor):
 ### Before any real flight
 - **Fin check** must be run on the rail (unskippable via pre-arm), and fin **direction**
   confirmed by eye.
-- Set the **real control-tab dimensions** (`SIM_RKT_TAB_C/TAB_SPAN/TAB_MAX`) once measured.
+- Set the **real control-tab dimensions in mm** (`SIM_RKT_TAB_W/TAB_H/TAB_RT/TAB_AX/TAB_MAX`; MATLAB `P.tab`) once measured.
 - Set **`AHRS_ORIENTATION`** to how the board is actually mounted.
 - **Tune `ATC_*`** against the corrected plant (open item).
 - Review the arming checklist (`ARMING_CHECK`) per your airframe.
+
+### Setting your control-tab dimensions (plain English)
+
+The steering tabs on the back of each fin are the **only** thing the simulator can't get
+from OpenRocket — you measure them yourself. Measure the real tab and type in **5 numbers**;
+the sim then works out how strong the steering is on its own.
+
+Standard fin terms: the **root chord** is where the fin meets the body, the **tip chord**
+is the outer end, the **leading edge** is the front, the **trailing edge** is the back, and
+**span** is root-to-tip. The tab is a flap on the **trailing edge**. Measure these on one
+fin (mm, except the last):
+
+```
+                        tip chord
+                        ┌──────┐
+                      /        │
+                    /          │
+       leading    /            │ ◄── trailing edge
+        edge    /          ┌───┤ ─┐   (the tab hinges here, on the back edge)
+         ──►  /            │▓▓▓│  │  (2) HEIGHT = tab length along the
+            /              │▓▓▓│  │              trailing edge (spanwise)
+          /                └───┤ ─┘
+        /                      │ ─┐
+       └───────────────────────┘  │  (3) ROOT = distance up the span from the
+            root chord           ─┘            root edge to the tab
+       (fin meets the body)
+                           └─┬─┘
+                       (1) WIDTH = tab depth, measured forward from
+                                   the trailing edge
+
+  (4) AXIS = hinge inset, measured back from the tab's leading (front) edge.
+             Leave 0 unless the pivot sits behind the tab's front edge.
+  (5) MAX  = full-throw tab deflection, in DEGREES (you have 20).
+```
+
+**Where to type them — two places, same 5 numbers:**
+
+*MATLAB sim* — edit `Tools/ArduRocket/matlab/rocket_params.m`, the `P.tab` block:
+```matlab
+P.tab.width   = 50;    % (1) mm
+P.tab.height  = 77;    % (2) mm
+P.tab.root    = 13;    % (3) mm
+P.tab.axis    = 0;     % (4) mm
+P.tab.max_deg = 20;    % (5) degrees
+```
+
+*Built-in SITL sim* — set these parameters (QGC's Parameters editor, or the `.parm` file):
+```
+SIM_RKT_TAB_W    50     (1) mm
+SIM_RKT_TAB_H    77     (2) mm
+SIM_RKT_TAB_RT   13     (3) mm
+SIM_RKT_TAB_AX   0      (4) mm
+SIM_RKT_TAB_MAX  20     (5) degrees
+```
+
+Change them, re-run, done — the sim recomputes the steering strength automatically. The
+numbers above are placeholder guesses; replace them with your real measurements.
 
 ---
 

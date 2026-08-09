@@ -1892,19 +1892,19 @@ OUT:
   when the real tabs are measured.
  */
 const AP_Param::GroupInfo SIM::RocketParms::var_info[] = {
-    // @Param: TAB_C
-    // @DisplayName: Control tab chord fraction
-    // @Description: Chord of the control tab as a fraction of the fin chord. ASSUMED, not measured. Drives the flap effectiveness, and so the steering authority, roughly linearly.
-    // @Range: 0.05 1.0
+    // @Param: TAB_W
+    // @DisplayName: Control tab width (flap depth)
+    // @Description: Depth of the trailing-edge control tab, measured forward from the fin trailing edge, in millimetres. This is the moving flap chord and drives the tab effectiveness. Measure it on the real airframe.
+    // @Units: mm
     // @User: Advanced
-    AP_GROUPINFO("TAB_C", 1, RocketParms, tab_chord, 0.25),
+    AP_GROUPINFO("TAB_W", 1, RocketParms, tab_width, 50.0),
 
-    // @Param: TAB_SPAN
-    // @DisplayName: Control tab span fraction
-    // @Description: Span of the control tab as a fraction of the fin semi-span. ASSUMED, not measured. Steering authority scales linearly with this.
-    // @Range: 0.1 1.0
+    // @Param: TAB_H
+    // @DisplayName: Control tab height (spanwise length)
+    // @Description: Length of the control tab along the fin trailing edge (spanwise), in millimetres. Sets how much of the fin span the tab covers.
+    // @Units: mm
     // @User: Advanced
-    AP_GROUPINFO("TAB_SPAN", 2, RocketParms, tab_span, 0.75),
+    AP_GROUPINFO("TAB_H", 2, RocketParms, tab_height, 77.0),
 
     // @Param: TAB_MAX
     // @DisplayName: Maximum tab deflection
@@ -1913,6 +1913,20 @@ const AP_Param::GroupInfo SIM::RocketParms::var_info[] = {
     // @Range: 5 45
     // @User: Advanced
     AP_GROUPINFO("TAB_MAX", 3, RocketParms, tab_max_deg, 20.0),
+
+    // @Param: TAB_RT
+    // @DisplayName: Control tab root offset
+    // @Description: Spanwise distance from the fin root to the tab's inboard end, in millimetres. With TAB_H this fixes where the tab sits along the span, which sets its moment arm out from the body axis.
+    // @Units: mm
+    // @User: Advanced
+    AP_GROUPINFO("TAB_RT", 21, RocketParms, tab_root, 13.0),
+
+    // @Param: TAB_AX
+    // @DisplayName: Control tab hinge inset
+    // @Description: Hinge (rotation axis) inset aft of the tab's forward edge, in millimetres. 0 means the tab hinges at its forward edge, so the full width TAB_W is the moving flap.
+    // @Units: mm
+    // @User: Advanced
+    AP_GROUPINFO("TAB_AX", 22, RocketParms, tab_axis, 0.0),
 
     // @Param: FIN_ROOT
     // @DisplayName: Fin root chord

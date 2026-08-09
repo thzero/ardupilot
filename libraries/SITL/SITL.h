@@ -371,8 +371,10 @@ public:
         }
         static const struct AP_Param::GroupInfo var_info[];
 
-        AP_Float tab_chord;    // control tab chord, as a fraction of fin chord
-        AP_Float tab_span;     // control tab span, as a fraction of fin span
+        AP_Float tab_width;    // control tab flap depth forward from the trailing edge, mm
+        AP_Float tab_height;   // control tab length along the trailing edge (spanwise), mm
+        AP_Float tab_root;     // spanwise distance from the fin root to the tab inboard end, mm
+        AP_Float tab_axis;     // hinge inset aft of the tab forward edge, mm (0 = at that edge)
         AP_Float tab_max_deg;  // maximum tab deflection, degrees
         AP_Float fin_root;     // fin root chord, m
         AP_Float fin_tip;      // fin tip chord, m

@@ -76,21 +76,29 @@ void Rocket::recompute_fin_geometry()
     const float Kfb = 1.0f + rb / (sspan + rb);
 
     /*
-      Trailing-edge tab effectiveness. A tab deflects the flow over the WHOLE fin
-      rather than rotating it, so it delivers only a fraction of a flying fin:
-        tau = 1 - (theta - sin theta)/pi,  theta = acos(2*cf/c - 1)
-      times ~0.85 for real viscous losses, times the tab's span fraction.
+      Trailing-edge control tab, defined in MILLIMETRES (TAB_W/H/RT/AX). A tab deflects
+      the flow over the whole fin rather than rotating it, so it delivers only a fraction
+      of a flying fin:
+        tau = 1 - (theta - sin theta)/pi,  theta = acos(2*cf - 1)
+      where cf is the moving flap chord as a fraction of the LOCAL fin chord at the tab,
+      times ~0.85 for viscous losses, times the tab's span fraction. Kept identical to
+      the MATLAB rocket_fin_gain.m so the two sims agree.
      */
-    const float cf = constrain_float(p.tab_chord, 0.01f, 1.0f);
+    const float mm = 0.001f;
+    const float y0 = p.tab_root * mm;                     // inboard edge, from the fin root
+    const float y1 = y0 + p.tab_height * mm;              // outboard edge
+    const float yc = 0.5f * (y0 + y1);                    // spanwise centre
+    const float span_frac = constrain_float((y1 - y0) / sspan, 0.0f, 1.0f);
+
+    const float c_tab = Cr + (Ct - Cr) * (yc / sspan);    // local fin chord at the tab
+    const float flap_chord = MAX(p.tab_width - p.tab_axis, 0.0f) * mm;
+    const float cf = constrain_float(flap_chord / c_tab, 0.01f, 1.0f);
     const float theta = acosf(constrain_float(2.0f*cf - 1.0f, -1.0f, 1.0f));
-    const float tau = (1.0f - (theta - sinf(theta)) / M_PI) * 0.85f
-                      * constrain_float(p.tab_span, 0.0f, 1.0f);
+    const float tau = (1.0f - (theta - sinf(theta)) / M_PI) * 0.85f * span_frac;
 
     fin_force_gain = S_fin * CLa * Kfb * tau * radians(p.tab_max_deg);
     fin_arm_m      = p.fin_arm;
-    // fin force acts at the spanwise centre of the MAC, out from the body axis
-    const float y_mac = (sspan/3.0f) * ((Cr + 2.0f*Ct) / (Cr + Ct));
-    fin_radius_m   = rb + y_mac;
+    fin_radius_m   = rb + yc;    // tab spanwise centre, out from the body axis
 
     // Static margin sets what the fins have to fight: the airframe weathercocks
     // into the relative wind with this stiffness.
@@ -99,9 +107,9 @@ void Rocket::recompute_fin_geometry()
     const float CNa   = 2.0f * S_fin * CLa * Kfb / A_ref + 2.0f;  // fins + nose
     instability_gain  = -CNa * A_ref * (p.static_margin * 2.0f * rb);
 
-    last_geom_hash = p.tab_chord + p.tab_span*3 + p.tab_max_deg*7 + p.fin_root*11
-                   + p.fin_tip*13 + p.fin_semispan*17 + p.body_radius*19
-                   + p.fin_arm*23 + p.static_margin*29;
+    last_geom_hash = p.tab_width + p.tab_height*3 + p.tab_root*5 + p.tab_axis*7
+                   + p.tab_max_deg*11 + p.fin_root*13 + p.fin_tip*17 + p.fin_semispan*19
+                   + p.body_radius*23 + p.fin_arm*29 + p.static_margin*31;
 }
 
 float Rocket::thrust_at(float t) const
@@ -254,9 +262,9 @@ void Rocket::update(const struct sitl_input &input)
     // Pick up any runtime change to the SIM_RKT_* geometry.
     {
         const auto &p = AP::sitl()->rocket;
-        const float h = p.tab_chord + p.tab_span*3 + p.tab_max_deg*7 + p.fin_root*11
-                      + p.fin_tip*13 + p.fin_semispan*17 + p.body_radius*19
-                      + p.fin_arm*23 + p.static_margin*29;
+        const float h = p.tab_width + p.tab_height*3 + p.tab_root*5 + p.tab_axis*7
+                      + p.tab_max_deg*11 + p.fin_root*13 + p.fin_tip*17 + p.fin_semispan*19
+                      + p.body_radius*23 + p.fin_arm*29 + p.static_margin*31;
         if (!is_equal(h, last_geom_hash)) {
             recompute_fin_geometry();
         }

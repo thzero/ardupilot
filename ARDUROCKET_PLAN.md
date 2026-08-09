@@ -27,9 +27,12 @@
 >   out-muscle the wind at low q, not because the controller is failing. In calm air
 >   it holds within ~0.3 deg. This is a static-margin/tab-authority limit, not a
 >   tuning one; see §9's MOT_Q_REF sweep.
-> - **Control tab dimensions are ASSUMED** (25% chord, 75% span, 20 deg). They set fin
->   authority linearly and are not in either OpenRocket file. Measure and set the real
->   values (`SIM_RKT_TAB_*`).
+> - **Control tab dimensions are ASSUMED.** The tab is defined in **mm** on the trailing
+>   edge — width (flap depth), height (spanwise length), root offset, hinge inset
+>   (`SIM_RKT_TAB_W/H/RT/AX`, `TAB_MAX` deg; MATLAB `P.tab`). Not in either OpenRocket
+>   file; defaults are the old 25%/75%/20° assumption in mm. Measure and set the real tab;
+>   fin authority is derived from it (same formula in both sims: `recompute_fin_geometry`
+>   / `rocket_fin_gain.m`).
 > - **`ARMING_SKIPCHK -1`** in the defaults is a SITL bring-up shortcut. Use
 >   `21064` for real flight (see `Tools/autotest/default_params/rocket.parm`).
 > - **FIN DIRECTION IS NOT VERIFIED BY SOFTWARE — IT CANNOT BE.** The pre-arm fin
@@ -892,7 +895,7 @@ limit, since motors are not shared between airframes here.
 
 | group | params |
 |---|---|
-| geometry | `FIN_ROOT FIN_TIP FIN_SPAN BODY_R FIN_ARM TAB_C TAB_SPAN TAB_MAX MARGIN` |
+| geometry | `FIN_ROOT FIN_TIP FIN_SPAN BODY_R FIN_ARM TAB_W TAB_H TAB_RT TAB_AX TAB_MAX MARGIN` |
 | mass / motor | `DRYMASS PRPMASS IMPULSE BRNTIME IGNDLY` |
 | inertia | `JTILT0/JTILT1 JSPIN0/JSPIN1` (loaded/burnt pair, interpolated on burn fraction) |
 | aero | `DRAGA ROTDAMP` |

@@ -42,19 +42,38 @@ P.rho_sl = 1.225;           % kg/m^3 at sea level
 % FIN GEOMETRY, not a mixing table. See rocket_step.m -- each fin is handled on its
 % own so this file never encodes AP_FinMixerRocket's convention.
 %
-% From the .ork: 4 trapezoidal fins, root 305 mm, tip 102 mm, semi-span 102 mm,
-% sweep 178 mm -> area 0.0206 m^2, aspect ratio 1.00, CP 2.250 m from the nose,
-% i.e. 678 mm behind the mid-burn CG and 92 mm out from the body axis.
-%
-% fin_force_gain is the force ONE fin makes per unit dynamic pressure at full
-% command. The airframe steers with TRAILING-EDGE TABS, not whole rotating fins:
-%   whole-fin rotation at 20 deg would give 0.0142 N/Pa
-%   ASSUMED tab 25% of chord over 75% of span -> x0.61 x0.85 x0.75 -> 0.00546
-% THIS IS THE ONE NUMBER TO UPDATE once the real tab dimensions are known.
-P.fin_angle_deg  = [270 180 90 0];  % fin positions around the body
-P.fin_force_gain = 0.005456;        % N per Pa per unit command, per fin
-P.fin_arm_m      = 0.6781;          % fin CP behind the CG
-P.fin_radius_m   = 0.0918;          % fin CP out from the body axis
+% Fin planform from the .ork: 4 trapezoidal fins.
+P.fin.root_chord  = 305;    % mm
+P.fin.tip_chord   = 102;    % mm
+P.fin.semispan    = 102;    % mm, exposed (root to tip)
+P.fin.sweep       = 178;    % mm, leading-edge sweep (root LE to tip LE, aft)
+P.fin.body_radius = 49.5;   % mm
+
+% CONTROL TAB on the fin TRAILING EDGE, in millimetres. This is the airframe's steering
+% surface; fin_force_gain is now DERIVED from it (rocket_fin_gain.m), not assumed.
+%   width  = flap depth forward from the trailing edge  (drives effectiveness)
+%   height = tab length along the trailing edge (spanwise)
+%   root   = spanwise distance from the fin root to the tab's inboard end
+%   axis   = hinge inset aft of the tab's forward edge (0 = hinge at that edge)
+%   max_deg= deflection at full command
+% The values below are the OLD 25%/75%/20deg assumption expressed in mm -- REPLACE them
+% with the measured tab and re-run; the authority updates. (These defaults reproduce a
+% force_gain of ~0.00554, within ~1.5% of the previous 0.00546.)
+P.tab.width   = 50;    % mm
+P.tab.height  = 77;    % mm
+P.tab.root    = 13;    % mm
+P.tab.axis    = 0;     % mm
+P.tab.max_deg = 20;    % deg
+
+P.fin_angle_deg = [270 180 90 0];   % fin positions around the body
+[P.fin_force_gain, P.fin_radius_m] = rocket_fin_gain(P.fin, P.tab);
+
+% Tilt moment arm: axial distance from the CG to the tab's centre of pressure. Kept as a
+% DIRECT measurement from the OpenRocket CG and fin-CP positions (0.6781 m) rather than
+% derived -- a swept fin makes the tab's axial station sensitive to exactly where the tab
+% sits, and the .ork gives CG and CP directly, so read it off rather than approximate it.
+% If you move the tab far inboard/outboard, update this from the .ork.
+P.fin_arm_m = 0.6781;   % m, CG -> tab CP (axial)
 % 2 calibers of static margin, from the .ork design (fg.4.K-L.reversed).
 %   |Ka| = CN_alpha * A_ref * (x_cp - x_cg) = 12.6 * 0.007707 * 0.198 = 0.0192
 % NEGATIVE = CP aft of CG = passively stable.
@@ -95,9 +114,10 @@ P.origin_alt = 584.0;
 % export and the .ork design file. One assumption is left:
 %
 %   the CONTROL TAB dimensions. The .ork's tabheight/tablength are the STRUCTURAL
-%   through-the-wall mounting tab, not a control surface, so the tab chord and span
-%   fractions above are assumed. fin_force_gain scales linearly with both, and
-%   with the maximum deflection angle.
+%   through-the-wall mounting tab, not a control surface, so the tab is now a set of
+%   millimetre inputs (P.tab above) that you MEASURE on the real airframe. Until then the
+%   defaults are the old 25%/75%/20deg assumption in mm; fin_force_gain is derived from
+%   them (rocket_fin_gain.m) and updates when you set the real numbers.
 %
 % Measured effect of the corrected plant (8 m/s crosswind, SITL):
 %   >100 m/s   mean tilt  2.1 deg   fins  0 us
