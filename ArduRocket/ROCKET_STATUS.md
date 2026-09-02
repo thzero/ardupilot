@@ -1,7 +1,27 @@
 # ArduRocket — vertical-control status & handoff (2026-09-01)
 
-Short note to pick this up cold. The vehicle **flies vertical off a realistic launch** and the
-hard root cause is fixed; there is **one open bug** (off-axis / roll-plane leans).
+Short note to pick this up cold. The vehicle **flies vertical off a realistic launch in any
+lean direction** (pitch-plane AND roll-plane/off-axis). The off-axis case is now fixed.
+
+> **CONFIG TRAP (this bit us for a whole session), now fixed:** the raw `--model … -w` launch
+> resolves its embedded defaults from `@ROMFS/vehicleinfo.json` by **exact model-string match**.
+> `rocket-tilt5-az90` was NOT registered there (only `rocket`, `rocket-tilt5/10/20` were), so the
+> az90 model fell back to firmware defaults (EKF3 + GPS on) and the no-GPS DCM never ran — while
+> `rocket-tilt5` DID load `rocket.parm`, which is why az0 "passed" and az90 "failed". Second bug:
+> the GPS param is **`GPS1_TYPE`**, not `GPS_TYPE`, so `rocket.parm`'s `GPS_TYPE 0` was silently
+> ignored and GPS stayed on even when the file loaded. EKF3-on-GPS flies pitch-plane leans but
+> glitches off-axis — masquerading as a "DCM estimator bug" for eight runs.
+> **Fixes:** (1) `GPS_TYPE`→`GPS1_TYPE` in rocket.parm; (2) az90 frames registered in
+> `Tools/autotest/pysim/vehicleinfo.json` (needs `./waf configure --board sitl` to re-embed);
+> (3) `rocket_test.py` reads AHRS_EKF_TYPE / GPS1_TYPE at startup and **refuses to run** on the
+> wrong estimator. Raw `./build/sitl/bin/rocket --model rocket-tilt5-az90 -w` now works with no
+> `--defaults`. New azimuth/tilt combos still need a vehicleinfo.json entry (or the guard trips).
+>
+> **Known intermittent (benign):** a rare true-spin spike (~285°/s, seen ONCE in ~6 runs) near
+> rail departure on the tiny spin inertia; never corrupted the estimate (`d=0` through it). Normal
+> runs read `mean 0 / max 1–3°/s` (damper holds it). Characterize it with
+> `rocket_test.py gains --spin` (200 Hz truth window; auto-classifies isolated glitch vs real
+> multi-sample event, stays quiet below 15°/s). Not worth chasing unless it starts recurring.
 
 ## What works (confirmed in SITL, baked into `Tools/autotest/default_params/rocket.parm`)
 
@@ -31,22 +51,21 @@ Fix chain (all in `ArduRocket/rocket_control.cpp` + `rocket.parm`, built into `b
    also overriding the ATC (its cascade throttled the fins to ~0 on a standing lean). MatrixPilot
    style (P on the gravity vector). `RKT_TILT_P 4.0`, `RKT_TILT_D 0.3`.
 
-## OPEN BUG — roll / off-axis leans (top priority)
+## RESOLVED — roll / off-axis leans
 
-`--model rocket-tilt5-az90` (lean in the roll plane instead of pitch) **FAILS**: estimate
-diverges from truth by up to 15° (NOT coning — spin stays low), the fins barely move, and the
-give-up fires on an estimate glitch. All testing to date was pitch-plane (az0) only, so this was
-hidden. Real launches lean into the wind in an arbitrary direction, so it matters.
+`--model rocket-tilt5-az90` now **PASSES**: drives the 5° roll-plane lean to vertical, holds
+steady true tilt ~2.0°, estimate `d = 0` the whole flight, `omegaI` flat at 0.
 
-**First clue / where to start:** the vehicle reported `rail attitude 0.0/-5.0` (roll 0, pitch
-−5) for `-az90` — the SAME as az0. So either the sim azimuth isn't rotating the tilt as expected,
-or the vehicle is **mis-capturing the tilt direction at arming** (reading an off-axis lean as
-pure pitch). If the captured rail attitude is on the wrong axis, the target/control references
-the wrong axis — which fits "fins don't steer, estimate wanders." Steps:
-1. Confirm the sim's TRUE tilt direction under `-az90` (SIMSTATE roll/pitch) vs. what the vehicle
-   captured (`rail_roll_rad`/`rail_pitch_rad`).
-2. If they disagree → rail-attitude capture / view-frame axis bug. If they agree → the gyro-only
-   estimate drifts on the roll axis, or the direct tilt controller's roll axis is wrong.
+**Real root cause (not what it looked like):** the off-axis test was silently running **EKF3 on
+GPS**, not the DCM — because `rocket.parm` set the nonexistent `GPS_TYPE` (real name
+`GPS1_TYPE`), so GPS was never turned off, and because the raw `-w` launch didn't apply
+`rocket.parm` at all (needs `--defaults`). EKF3 dead-reckoning under thrust handles a pitch-plane
+lean but glitches off-axis — which read exactly like a "DCM tilt divergence." Once the DCM
+actually runs (EKF_TYPE=0 + GPS1_TYPE=0), the committed gyro-only gate flies it. **No changes to
+`libraries/AP_AHRS/` were needed** — a session of DCM edits chasing this was reverted.
+
+Fix = one param rename (`GPS_TYPE`→`GPS1_TYPE`) + always launch with `--defaults` + the harness
+now refuses to run on the wrong estimator. See the CONFIG TRAP box at the top.
 
 ## Cleanup TODO (on a working vehicle — none urgent)
 
@@ -60,3 +79,11 @@ the wrong axis — which fits "fins don't steer, estimate wanders." Steps:
   spin_test}.parm` (investigation leftovers).
 - **Write the full investigation into ARDUROCKET_PLAN.md** (spin root cause + estimator chain +
   tab-authority-vs-launch-angle finding).
+
+
+PLAN writeup — the spin root cause, the estimator chain, and the tab-authority-vs-launch-angle finding (flies vertical to ~5–10° on the real fins; 20° would need bigger fins).
+Prune dead knobs — the direct controller bypassed the cascade, so ATC_ANG/RAT_*, RKT_LEVEL_Q, and the target blend do nothing now; leaving them is misleading.
+Nudge the spin damper gain (crept to mean 280 under aggressive fins off 20°; it's 0 off 5°, so low priority).
+Delete the scratch .parm files.
+
+sure lets do this.

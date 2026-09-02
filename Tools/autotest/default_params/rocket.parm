@@ -210,7 +210,10 @@ AHRS_EKF_TYPE    0
 AHRS_RP_P        0.2
 
 # --- GPS: NONE --------------------------------------------------------------
-# There is no GPS on the flight controller, and it stays off (GPS_TYPE 0). Two reasons:
+# There is no GPS on the flight controller, and it stays off (GPS1_TYPE 0). Two reasons:
+# NOTE: the parameter is GPS1_TYPE, not GPS_TYPE. The old GPS_TYPE name no longer exists, so a
+# "GPS_TYPE 0" line is silently ignored and the GPS stays ON at its default -- which put EKF3
+# on GPS and hid the whole no-GPS design for an entire debugging session. Use GPS1_TYPE.
 #   1. A GPS receiver loses lock under high-g boost -- exactly when control matters most --
 #      and a dropout mid-boost is worse than never trusting it.
 #   2. With DCM as the estimator (above), a PRESENT GPS actively corrupts the attitude: its
@@ -224,7 +227,7 @@ AHRS_RP_P        0.2
 #
 # Consequence: no position solution, so no home is ever set. That is expected.
 # GLOBAL_POSITION_INT will not be valid. Arming resets the height datum to the rail.
-GPS_TYPE         0
+GPS1_TYPE        0
 #
 # Keep EKF3 (the dormant fallback) from ever using GPS for horizontal state -- baro for
 # height only -- should it ever become primary.

@@ -41,10 +41,13 @@ def connect(url):
     m.wait_heartbeat(timeout=30)
     m._sys = m.target_system
     m._comp = m.target_component
-    # ATTITUDE (est) and SIMSTATE (truth, incl. TRUE body rates) at 25 Hz; servo outputs 25 Hz.
+    # ATTITUDE (est) at 25 Hz; SIMSTATE (truth, incl. TRUE body rates) and servo outputs at
+    # 200 Hz so a brief rail-departure spin transient is captured at ~5 ms resolution, not aliased.
     for msgid, hz in ((mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE, 25),
-                      (mavutil.mavlink.MAVLINK_MSG_ID_SIMSTATE, 25),
-                      (mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW, 25)):
+                      (mavutil.mavlink.MAVLINK_MSG_ID_SIMSTATE, 200),
+                      (mavutil.mavlink.MAVLINK_MSG_ID_AHRS, 25),   # DCM internals: error_rp, omegaI
+                      (mavutil.mavlink.MAVLINK_MSG_ID_RAW_IMU, 25),  # accel magnitude (latch gate)
+                      (mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW, 200)):
         m.mav.command_long_send(m._sys, m._comp,
                                 mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
                                 msgid, int(1e6 / hz), 0, 0, 0, 0, 0)
@@ -54,6 +57,32 @@ def connect(url):
 def set_param(m, name, value, ptype=mavutil.mavlink.MAV_PARAM_TYPE_REAL32):
     m.mav.param_set_send(m._sys, m._comp, name.encode(), float(value), ptype)
     time.sleep(0.2)
+
+
+def get_param(m, name, timeout=4.0):
+    m.mav.param_request_read_send(m._sys, m._comp, name.encode(), -1)
+    t = time.time()
+    while time.time() - t < timeout:
+        msg = m.recv_match(type="PARAM_VALUE", blocking=True, timeout=1.0)
+        if msg and msg.param_id.rstrip("\x00") == name:
+            return msg.param_value
+    return None
+
+
+def print_estimator_config(m):
+    """Which estimator is ACTUALLY running. If AHRS_EKF_TYPE != 0 the attitude comes from
+    EKF3, NOT the no-GPS DCM the vehicle is designed around -- and the results are meaningless.
+    This is exactly the trap that hid an eight-run investigation: launching without
+    `--defaults Tools/autotest/default_params/rocket.parm` boots on firmware defaults (EKF3)."""
+    ekf = get_param(m, "AHRS_EKF_TYPE")
+    gps = get_param(m, "GPS1_TYPE")
+    for p in ("AHRS_EKF_TYPE", "GPS1_TYPE", "EK3_ENABLE", "AHRS_GPS_USE"):
+        print(f"   PARAM {p} = {get_param(m, p)}")
+    if ekf != 0.0 or (gps is not None and gps != 0.0):
+        print("   !!! Wrong estimator config: want AHRS_EKF_TYPE=0 (no-GPS DCM) and GPS1_TYPE=0.")
+        print("   !!! Relaunch SITL with: "
+              "--defaults Tools/autotest/default_params/rocket.parm")
+        raise SystemExit("refusing to run: wrong estimator (see above)")
 
 
 def load_params(m, path):
@@ -123,7 +152,11 @@ def run(m, seconds):
     last_tilt = None
     last_true = None
     last_fin = 0.0
-    truerates = []            # (t_rel, spin_x deg/s, transverse_yz deg/s) from SIMSTATE truth
+    last_sfins = [0.0, 0.0, 0.0, 0.0]   # signed per-fin deflection (-1..1)
+    axes = []                 # (t_rel, view_roll_deg, view_pitch_deg, [f1..f4]) per-axis view
+    ahrs_int = []             # (t_rel, error_rp, |omegaI| deg/s, |accel| raw) DCM internals
+    last_accel_raw = 0.0      # latest |accelerometer| (raw units; normalised to g at print)
+    truerates = []            # (t_rel, SIGNED spin_x deg/s, transverse_yz deg/s, [f1..f4]) truth
     t0 = None
     ascent_end = None         # abs time control stopped (apogee / give-up); metrics scope
     last_hb = 0
@@ -143,6 +176,10 @@ def run(m, seconds):
             last_tilt = tilt_from_attitude(msg)
             tilt.append((now, last_tilt))
             traj.append((now - t0, last_tilt, last_true, last_fin))
+            # per-axis: the ESTIMATE's view roll/pitch ARE the two tilt axes the direct
+            # controller acts on (set_roll <- view roll, set_pitch <- view pitch).
+            axes.append((now - t0, math.degrees(msg.roll), math.degrees(msg.pitch),
+                         list(last_sfins)))
         elif t == "SIMSTATE":
             # sim TRUTH. SIMSTATE is the RAW airframe attitude (nose-up = pitch +90 deg),
             # NOT the vehicle's ROTATION_PITCH_90 view that ATTITUDE uses. Tilt from vertical
@@ -154,9 +191,19 @@ def run(m, seconds):
             # transverse tilt rate (y,z). A large spin with a tilt is coning, which first-order
             # DCM integration turns into a systematic tilt error.
             if t0 is not None:
-                spin = abs(math.degrees(msg.xgyro))
+                spin = math.degrees(msg.xgyro)   # SIGNED nose spin (body X)
                 trans = math.degrees(math.sqrt(msg.ygyro ** 2 + msg.zgyro ** 2))
-                truerates.append((time.time() - t0, spin, trans))
+                truerates.append((time.time() - t0, spin, trans, list(last_sfins)))
+        elif t == "AHRS":
+            # DCM internals. error_rp = low-passed length of the accel/gravity correction
+            # error: ~0 means the accelerometer is NOT correcting attitude (gate holding);
+            # a jump means the accel IS pulling the estimate. omegaI = gyro-bias estimate.
+            if t0 is not None:
+                oi = math.degrees(math.sqrt(msg.omegaIx ** 2 + msg.omegaIy ** 2 +
+                                            msg.omegaIz ** 2))
+                ahrs_int.append((time.time() - t0, msg.error_rp, oi, last_accel_raw))
+        elif t == "RAW_IMU":
+            last_accel_raw = math.sqrt(msg.xacc ** 2 + msg.yacc ** 2 + msg.zacc ** 2)
         elif t == "SERVO_OUTPUT_RAW":
             chans = [c for c in (msg.servo1_raw, msg.servo2_raw,
                                  msg.servo3_raw, msg.servo4_raw) if c]
@@ -164,12 +211,16 @@ def run(m, seconds):
                 continue
             defl = max(abs(c - 1500) / 500.0 for c in chans)   # 0..1, full = 1
             last_fin = defl
+            last_sfins = [(c - 1500) / 500.0 for c in            # signed, per fin
+                          (msg.servo1_raw, msg.servo2_raw, msg.servo3_raw, msg.servo4_raw)]
             if any(c <= 1010 or c >= 1990 for c in chans):
                 servo_sat = True
             if last_tilt is not None:
                 fin_vs_tilt.append((last_tilt, defl))
         elif t == "STATUSTEXT":
             s = msg.text
+            if s.startswith("DCM:"):
+                print(f"   [{s}]")
             if s.startswith("Rocket:"):
                 stages.append((round(time.time(), 2), s))
                 if "giving up" in s:
@@ -190,10 +241,14 @@ def run(m, seconds):
     sat_lo = any(fn > 0.98 for _, est, _, fn in asc if est < 8)   # pinned near vertical?
     servo_sat = any(fn >= 0.98 for _, _, _, fn in asc)
     # TRUE spin and transverse rates over the ascent (deg/s).
-    rr = [(s, tv) for tr, s, tv in truerates if ascent_rel is None or tr <= ascent_rel]
+    rr = [(abs(s), tv) for tr, s, tv, f in truerates if ascent_rel is None or tr <= ascent_rel]
     spins = [s for s, _ in rr]
     transs = [tv for _, tv in rr]
-    return dict(tilt=tilt, traj=traj, ascent_rel=ascent_rel,
+    ai = [(tr, e, oi) for tr, e, oi, _ in ahrs_int if ascent_rel is None or tr <= ascent_rel]
+    return dict(tilt=tilt, traj=traj, axes=axes, ahrs_int=ahrs_int,
+                err_rp_max=max((e for _, e, _ in ai), default=None),
+                omegaI_max=max((oi for _, _, oi in ai), default=None),
+                ascent_rel=ascent_rel,
                 max_tilt=max(est_vals) if est_vals else None,
                 final_tilt=est_vals[-1] if est_vals else None,
                 true_max=max(true_vals) if true_vals else None,
@@ -202,7 +257,80 @@ def run(m, seconds):
                 fin_hi=max(hi) if hi else 0.0, sat_lo=sat_lo,
                 spin_mean=(sum(spins) / len(spins)) if spins else None,
                 spin_max=max(spins) if spins else None,
-                trans_max=max(transs) if transs else None)
+                trans_max=max(transs) if transs else None,
+                truerates=truerates)
+
+
+def print_spin_transient(truerates, ascent_rel=None, half_window_s=0.30):
+    """Characterize the rail-departure nose-spin transient from the 200 Hz truth stream. Finds
+    the peak |spin| and dumps the full-rate window around it, so a one-sample numerical glitch
+    (isolated spike, ~0 on both sides) is distinguishable from a real spin the damper is fighting
+    (a bump spanning many samples). Also prints the fin channels so we can see the damper respond
+    (the yaw/spin command is the common-mode component: (f1+f2+f3+f4)/4)."""
+    asc = sorted((r for r in truerates if ascent_rel is None or r[0] <= ascent_rel),
+                 key=lambda r: r[0])
+    if not asc:
+        print("   SPIN TRANSIENT: no truth samples")
+        return
+    peak = max(asc, key=lambda r: abs(r[1]))
+    pt, ps = peak[0], peak[1]
+    NEGLIGIBLE = 15.0   # deg/s -- below this the damper is simply holding it; not worth a look
+    if abs(ps) < NEGLIGIBLE:
+        print(f"   SPIN TRANSIENT: peak only {ps:+.0f} deg/s (< {NEGLIGIBLE:.0f}) -- negligible, "
+              f"spin damper holding. No rail-departure spike this run.")
+        return
+    # window around the peak, sorted + de-duped (200 Hz wall-clock timestamps can collide)
+    near, seen = [], set()
+    for r in asc:
+        if abs(r[0] - pt) <= half_window_s and round(r[0], 4) not in seen:
+            seen.add(round(r[0], 4))
+            near.append(r)
+    wide = sum(1 for r in near if abs(r[1]) > 0.5 * abs(ps))
+    print(f"   SPIN TRANSIENT: peak {ps:+.0f} deg/s at t={pt:.3f}s  "
+          f"({wide} samples > half-peak => "
+          f"{'ISOLATED one-sample glitch (sim/rail-release artifact)' if wide <= 1 else 'a real multi-sample spin the damper is fighting'})")
+    print("   t(s)     spin   transv | fin1  fin2  fin3  fin4  yaw(cmn)")
+    for tr, s, tv, f in near:
+        print(f"   {tr:6.3f}  {s:+6.0f}  {tv:6.0f} | {f[0]:5.2f} {f[1]:5.2f} {f[2]:5.2f} "
+              f"{f[3]:5.2f}  {sum(f)/4.0:+5.2f}")
+
+
+def print_ahrs_internals(ahrs_int, step_s=0.4, ascent_rel=None):
+    """DCM internals over the ascent: error_rp (accel/gravity correction magnitude -- ~0 while
+    the gyro-only gate holds; a spike = the accelerometer is pulling the estimate) and |omegaI|
+    (the gyro-bias estimate, deg/s -- a frozen non-zero value would drift the estimate)."""
+    if not ahrs_int:
+        print("   (no AHRS messages received -- is the AHRS stream enabled?)")
+        return
+    # normalise the raw accel magnitude to g using the on-pad value (true 1g while stationary)
+    pad = next((a for _, _, _, a in ahrs_int if a > 0), 1.0)
+    print("   t(s)   error_rp   |omegaI| deg/s   |accel| g   "
+          "(accel>1.25g or <0.75g => should be gated; >2g => latch)")
+    next_t = 0.0
+    for tr, e, oi, araw in ahrs_int:
+        if ascent_rel is not None and tr > ascent_rel:
+            break
+        if tr + 1e-9 < next_t:
+            continue
+        next_t = tr + step_s
+        print(f"   {tr:4.1f}   {e:8.4f}   {oi:8.3f}   {araw / pad:7.2f}")
+
+
+def print_axes(axes, step_s=0.4, ascent_rel=None):
+    """Per-axis view: the estimate's view-roll and view-pitch (the two tilt axes the direct
+    controller acts on) and the four signed fin channels. Shows WHICH axis carries the lean
+    and WHICH fins respond -- the thing tilt-magnitude alone can't reveal."""
+    if not axes:
+        return
+    print("   t(s)  v_roll v_pitch |  fin1  fin2  fin3  fin4")
+    next_t = 0.0
+    for tr, vr, vp, f in axes:
+        if ascent_rel is not None and tr > ascent_rel:
+            break
+        if tr + 1e-9 < next_t:
+            continue
+        next_t = tr + step_s
+        print(f"   {tr:4.1f}  {vr:6.1f} {vp:6.1f}  | {f[0]:5.2f} {f[1]:5.2f} {f[2]:5.2f} {f[3]:5.2f}")
 
 
 def print_trajectory(traj, step_s=0.4, ascent_rel=None):
@@ -260,6 +388,10 @@ def main():
     ap.add_argument("--mph", type=float, default=8.0, help="crosswind for 'wind'")
     ap.add_argument("--gains", metavar="FILE",
                     help="load this .parm before flying (any scenario)")
+    ap.add_argument("--axes", action="store_true",
+                    help="print the per-axis view (view roll/pitch + the 4 fin channels)")
+    ap.add_argument("--spin", action="store_true",
+                    help="characterize the rail-departure nose-spin transient (200 Hz window)")
     ap.add_argument("--reboot", action="store_true",
                     help="reboot the FC after loading params (needed for boot-time params "
                          "like AHRS_EKF_TYPE / GPS_TYPE to take effect), then reconnect")
@@ -267,6 +399,7 @@ def main():
 
     m = connect(args.url)
     print(f"connected to {args.url}")
+    print_estimator_config(m)
 
     if args.gains:
         load_params(m, args.gains)
@@ -329,6 +462,13 @@ def main():
         force_arm(m)
         r = run(m, 30)
         report("GENTLE GAINS (20 deg rail)", r)
+        if args.spin:
+            print_spin_transient(r["truerates"], ascent_rel=r.get("ascent_rel"))
+        if args.axes:
+            print_axes(r["axes"], ascent_rel=r.get("ascent_rel"))
+            print(f"   DCM: max error_rp {r['err_rp_max']}  max |omegaI| {r['omegaI_max']} deg/s"
+                  f"   (accel correcting in flight? want error_rp ~0)")
+            print_ahrs_internals(r["ahrs_int"], ascent_rel=r.get("ascent_rel"))
         print(f"   peak fin deflection: {r['fin_hi']:.2f}   (want > 0.25 = fins actually steered)")
         print(f"   fins pinned near vertical (<8 deg): {'YES' if r['sat_lo'] else 'no'}   (want no)")
         # Grade ONLY the high-q powered window, where the fins actually have authority. Skip

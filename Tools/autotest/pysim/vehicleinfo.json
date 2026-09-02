@@ -402,6 +402,18 @@
             "rocket-tilt20": {
                 "waf_target": "bin/rocket",
                 "default_params_filename": "default_params/rocket.parm"
+            },
+            "rocket-tilt5-az90": {
+                "waf_target": "bin/rocket",
+                "default_params_filename": "default_params/rocket.parm"
+            },
+            "rocket-tilt10-az90": {
+                "waf_target": "bin/rocket",
+                "default_params_filename": "default_params/rocket.parm"
+            },
+            "rocket-tilt20-az90": {
+                "waf_target": "bin/rocket",
+                "default_params_filename": "default_params/rocket.parm"
             }
         }
     },
