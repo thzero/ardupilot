@@ -733,6 +733,21 @@ public:
     }
 
     /*
+     * attitude_gyro_only: when true, the DCM backend stops using the accelerometer to
+     * correct attitude and coasts on the gyro. A rocket sets this once launched: under
+     * motor thrust (tens of g along the nose) and under fin steering, the accelerometer
+     * measures those forces, not gravity, so it is a false "down" reference -- exactly the
+     * gate the flown MatrixPilot rocket uses (accel correction only before launch). Default
+     * false, so no other vehicle is affected.
+     */
+    void set_attitude_gyro_only(bool b) {
+        _attitude_gyro_only = b;
+    }
+    bool get_attitude_gyro_only(void) const {
+        return _attitude_gyro_only;
+    }
+
+    /*
      * fly_forward is set by the vehicles to indicate the vehicle
      * should generally be moving in the direction of its heading.
      * It is an additional piece of information that the backends can
@@ -919,6 +934,8 @@ private:
      * use to provide additional and/or improved estimates.
      */
     bool fly_forward; // true if we can assume the vehicle will be flying forward on its X axis
+
+    bool _attitude_gyro_only{false}; // true -> DCM coasts on the gyro, ignores accel for attitude (rocket boost/steering)
 
     // poke AP_Notify based on values from status
     void update_notify_from_filter_status(const nav_filter_status &status);

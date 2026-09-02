@@ -37,20 +37,22 @@ RKT_APOG_MS      500
 # fin output still clips at +/-1, MOT_Q_REF effectively sets how much of the fins'
 # physically available authority the controller is allowed to use at speed.
 #
-# 600 Pa was chosen by measurement, not derivation. Sweeping it against an 8 m/s
-# crosswind (worst tilt while the fins have real authority, i.e. above 25 m/s):
+# 2500 Pa. This is the single most important control number, and it was raised from an
+# earlier 600 once the attitude estimate was made trustworthy (see the estimator section):
+# at 600 the schedule crushed the fin command to ~5% during high-q boost (600/~5000 Pa),
+# so the airframe's 20-deg launch lean was never corrected in the window where the fins are
+# strongest, and it gravity-turned away to 100 deg by apogee. At 2500 the fins keep ~half
+# their command at boost q, and the airframe HOLDS its launch attitude (~20 deg off a 20-deg
+# rail) through the flight instead of tumbling. Low-q behaviour is unchanged -- MOT_GAIN_MAX
+# still caps the boost near rail exit.
 #
-#     MOT_Q_REF   142  ->  19.8 deg   fins only 10% travel: authority left unused
-#     MOT_Q_REF   600  ->  13.3 deg   fins 38% travel
-#     MOT_Q_REF  1200  ->  12.4 deg   but the 10-25 m/s band degrades to 30.8 deg
-#                                     and the fins approach saturation
-#
-# NOTE the earlier value of 142 was derived from the rail-exit dynamic pressure on
-# the theory that gains should be nominal at the lowest-authority moment. That is
-# sound for LOOP STABILITY but it throttles disturbance rejection everywhere above
-# rail exit, because the weathercock moment the fins fight grows with q while the
-# scheduled control moment stays constant.
-MOT_Q_REF        600
+# The reason it must be high: the weathercock moment the fins fight grows with q, so a
+# schedule that holds the CONTROL moment constant (small deflection at high q) loses at high
+# q. Raising MOT_Q_REF lets the fins keep authority where the disturbance is largest. Off a
+# NEAR-VERTICAL rail the required correction is small and it holds tight; the 20-deg case is
+# the worst legal one. History: 142 (rail-exit q, good for loop stability, starved
+# everything above rail exit) -> 600 -> 2500.
+MOT_Q_REF        5000
 
 # Upper bound on the low-q gain boost. This cannot create authority: the output
 # clips at +/-1 regardless, so the hard ceiling is Kf/|Ka| of angle of attack --
@@ -58,20 +60,30 @@ MOT_Q_REF        600
 MOT_GAIN_MAX     4
 
 # --- Attitude control -------------------------------------------------------
-# Placeholder gains. These have NOT been flown and are a starting point for SITL
-# tuning only. View roll and view pitch are the two tilt axes; view yaw is spin
-# about the long axis, which the vehicle does not try hard to control.
-ATC_RAT_RLL_P    0.08
-ATC_RAT_RLL_I    0.05
-ATC_RAT_RLL_D    0.003
-ATC_RAT_PIT_P    0.08
-ATC_RAT_PIT_I    0.05
-ATC_RAT_PIT_D    0.003
+# SITL-tuned tilt gains (not yet flown). With the spin killed and the estimate clean (see the
+# spin damper in rocket_control.cpp), these actively steer the 20-deg launch lean DOWN toward
+# vertical through the powered flight, instead of merely holding it. The cascade is
+# fin ~= ATC_ANG_P * angle_err * ATC_RAT_P.
+#   RAT_I 0.3  -- a FLIGHT integrator: it winds up the steady fin needed to null the lean
+#     against the airframe's weathercock. Safe because the flight code resets the rate I-terms
+#     while on the rail (rkt.hold_integrators()), so it is zero on the pad and only active once
+#     flying -- the earlier "no integrator" note was over-cautious.
+# View roll and view pitch are the two tilt axes. View yaw is spin about the long axis; it is
+# now ACTIVELY damped by a direct gyro spin damper in rocket_control.cpp (RKT_SPIN_DAMP), NOT
+# by these ATC_*_YAW gains -- leaving the spin uncontrolled let it run away to 1200 deg/s and
+# coning-corrupt the attitude estimate, which was the root cause of the vehicle not flying
+# vertical. Getting the last few degrees to dead-vertical is further tilt-gain refinement.
+ATC_RAT_RLL_P    0.8
+ATC_RAT_RLL_I    0.6
+ATC_RAT_RLL_D    0.04
+ATC_RAT_PIT_P    0.8
+ATC_RAT_PIT_I    0.6
+ATC_RAT_PIT_D    0.04
 ATC_RAT_YAW_P    0.10
 ATC_RAT_YAW_I    0.01
 ATC_RAT_YAW_D    0.0
-ATC_ANG_RLL_P    6.0
-ATC_ANG_PIT_P    6.0
+ATC_ANG_RLL_P    18.0
+ATC_ANG_PIT_P    18.0
 ATC_ANG_YAW_P    2.0
 
 # --- Loop rate --------------------------------------------------------------
@@ -124,7 +136,7 @@ ARMING_SKIPCHK   -1
 # 600 Pa is about 31 m/s -- shortly after the 50 fps (15.24 m/s, 142 Pa) rail exit,
 # so the rocket is commanding true vertical early in the boost.
 # Lower = level out sooner and harder. 0 = command vertical immediately, no blend.
-RKT_LEVEL_Q      600
+RKT_LEVEL_Q      0
 
 # Stop driving the fins below this dynamic pressure. Below it they cannot produce a
 # useful moment however far they deflect, so steering there only wastes travel and
@@ -165,25 +177,57 @@ COMPASS_USE3     0
 # No receiver. Without this the vehicle waits for RC it will never see.
 RC_PROTOCOLS     0
 
-# --- GPS: TRACKING ONLY, NOT CONTROL ----------------------------------------
-# GPS is enabled so its position reaches telemetry and the on-board log, which is
-# how you find the airframe after it lands. Set GPS_TYPE=0 from a ground station to
-# switch it off entirely; 1 = auto-detect.
+# --- Attitude estimator: DCM, not EKF3 --------------------------------------
+# This airframe has NO GPS (see below), which is the hard case for attitude estimation:
+# with no velocity reference an estimator cannot separate the vehicle's own acceleration
+# from gravity. Under boost the motor pulls tens of g along the nose, swamping the 1 g of
+# gravity the estimator uses to find "down".
 #
-# It is deliberately kept OUT of the flight control solution. The EK3_SRC settings
-# below tell the EKF to use baro for height and nothing for horizontal position or
-# velocity, so the attitude and climb-rate estimates the fins fly on come from
-# baro + IMU alone.
+# EKF3 cannot handle this without GPS. In SITL its tilt estimate glitched by up to 90 deg
+# and then held a large standing bias -- it reported a phantom 117 deg tilt while the true
+# tilt was 30. Retuning its process noise (EK3_ACC_P_NSE / GYRO_P_NSE) removed the glitches
+# but left a ~12 deg error it could not shed. The failure is structural -- no velocity
+# aiding to observe tilt -- not a tuning problem.
 #
-# Why: a GPS receiver loses lock under high-g boost and high dynamics -- exactly the
-# phase where control matters most -- and a dropout feeding the EKF mid-boost is far
-# more dangerous than simply never trusting it. Raw GPS for recovery is useful;
-# GPS in the control loop is not.
+# DCM holds attitude here, the way the flown MatrixPilot fin-steered rocket did: pure
+# gyro + accelerometer, no GPS. AHRS_EKF_TYPE 0 selects it. Vertical velocity -- needed for
+# apogee detection and the fin gain schedule -- then comes from the barometer's filtered
+# climb rate automatically (DCM's get_vert_pos_rate_D() falls back to AP_Baro when there is
+# no GPS velocity), so no code change is needed to feed it. EKF3 still runs as a dormant
+# fallback.
+AHRS_EKF_TYPE    0
 #
-# Consequence: with no GPS in the EKF there is no position solution, so no home is
-# ever set. That is expected. GLOBAL_POSITION_INT will not be valid; use the raw
-# GPS_RAW_INT message for tracking. Arming resets the height datum to the rail.
-GPS_TYPE         1
+# The KEY that makes DCM work under thrust and steering is a code gate, not a parameter:
+# ArduRocket calls ahrs.set_attitude_gyro_only(true) from BOOST through DESCENT, and the DCM
+# backend then STOPS using the accelerometer for attitude and coasts on the gyro. This is
+# exactly the flown MatrixPilot rocket's technique (rmat.c: accel correction only while
+# `launched == 0`): once the motor lights, the accelerometer measures thrust and fin-steering
+# force, not gravity, so it is a false "down" and must be ignored. On the pad the gate is off
+# and DCM aligns to true vertical from gravity. See rocket_control.cpp and AP_AHRS_DCM.cpp.
+#
+# AHRS_RP_P (how fast the accelerometer corrects attitude) therefore only matters ON THE PAD
+# now -- in flight the accelerometer is gated out entirely -- so it is left at the default.
+AHRS_RP_P        0.2
+
+# --- GPS: NONE --------------------------------------------------------------
+# There is no GPS on the flight controller, and it stays off (GPS_TYPE 0). Two reasons:
+#   1. A GPS receiver loses lock under high-g boost -- exactly when control matters most --
+#      and a dropout mid-boost is worse than never trusting it.
+#   2. With DCM as the estimator (above), a PRESENT GPS actively corrupts the attitude: its
+#      velocity feeds DCM's centripetal-acceleration correction, which pollutes the tilt
+#      once the fins start steering. In SITL, GPS-present made the estimate diverge past
+#      100 deg of error; GPS fully off held it within a few degrees. (AHRS_GPS_USE=0 only
+#      gates GPS navigation, not that correction, so it is not enough -- the receiver must
+#      be off.)
+# Finding the airframe after landing is an OFF-BOARD job (a separate recovery tracker), not
+# the flight controller's.
+#
+# Consequence: no position solution, so no home is ever set. That is expected.
+# GLOBAL_POSITION_INT will not be valid. Arming resets the height datum to the rail.
+GPS_TYPE         0
+#
+# Keep EKF3 (the dormant fallback) from ever using GPS for horizontal state -- baro for
+# height only -- should it ever become primary.
 EK3_SRC1_POSXY   0
 EK3_SRC1_VELXY   0
 EK3_SRC1_POSZ    1

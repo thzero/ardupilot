@@ -1011,10 +1011,14 @@ AP_AHRS_DCM::drift_correction(float deltat)
         }
     }
 
-    // if ins is unhealthy then stop attitude drift correction and
-    // hope the gyros are OK for a while. Just slowly reduce _omega_P
-    // to prevent previous bad accels from throwing us off
-    if (!_ins.healthy()) {
+    // Stop attitude drift correction and coast on the gyro when either:
+    //  - the IMU is unhealthy (hope the gyros are OK for a while), or
+    //  - the vehicle has asked to (get_attitude_gyro_only()): a rocket under motor thrust
+    //    and fin steering, where the accelerometer measures those forces rather than
+    //    gravity and so is a false "down". Zeroing the error kills BOTH _omega_P (below) and
+    //    the _omega_I accumulation, so no accelerometer influence reaches the attitude --
+    //    the same gate the flown MatrixPilot rocket uses (accel correction only pre-launch).
+    if (!_ins.healthy() || AP::ahrs().get_attitude_gyro_only()) {
         error[besti].zero();
     } else {
         // convert the error term to body frame

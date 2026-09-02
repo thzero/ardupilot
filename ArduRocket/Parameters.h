@@ -123,6 +123,14 @@ public:
      */
     AP_Float min_q;
 
+    /*
+      Tilt give-up backstop, degrees from vertical. If the airframe departs past this
+      angle while steering (BOOST/COAST), stop steering and centre the fins -- treat it
+      like apogee. Complements the climb-rate apogee, which can lag if the vehicle tumbles
+      while still ascending. 0 disables. See rocket_control.cpp.
+     */
+    AP_Float giveup_deg;
+
     // Flight stage detection: launch gating and burnout shutdown.
     AP_Rocket rocket;
 

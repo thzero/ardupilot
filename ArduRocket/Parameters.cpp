@@ -137,6 +137,14 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("RKT_MIN_Q", 4, ParametersG2, min_q, 50.0f),
 
+    // @Param: RKT_GIVEUP_DEG
+    // @DisplayName: Tilt give-up angle
+    // @Description: If the airframe tilts more than this many degrees from vertical while steering (BOOST/COAST), the controller stops steering and centres the fins, the same as at apogee. Past this angle a fin-steered rocket has lost control authority, so continuing to drive the fins does nothing but flail. This is a backstop that complements the climb-rate apogee detection, which can lag if the vehicle tumbles while still ascending. Set 0 to disable.
+    // @Units: deg
+    // @Range: 30 90
+    // @User: Standard
+    AP_GROUPINFO("RKT_GIVEUP_DEG", 5, ParametersG2, giveup_deg, 60.0f),
+
     // @Group: RKT_
     // @Path: ../libraries/AP_Rocket/AP_Rocket.cpp
     AP_SUBGROUPINFO(rocket, "RKT_", 1, ParametersG2, AP_Rocket),

@@ -1,0 +1,13 @@
+# Now that the spin is killed and the estimate is perfect (est == true), tune the tilt gains
+# for real: drive the TRUE attitude to vertical and hold it against the gravity turn. The
+# gentle baked gains (6.0 / 0.24) under-command -- the fins sit at 0.01-0.05 at an 18 deg lean
+# and the tilt walks up to 100 deg. Roughly double them. Watch the true tilt drive DOWN toward
+# 0 and the steady TRUE tilt go under 8 (mission PASS). If it starts oscillating, back off.
+ATC_ANG_RLL_P 12.0
+ATC_ANG_PIT_P 12.0
+ATC_RAT_RLL_P 0.5
+ATC_RAT_PIT_P 0.5
+ATC_RAT_RLL_D 0.02
+ATC_RAT_PIT_D 0.02
+ATC_RAT_RLL_I 0.0
+ATC_RAT_PIT_I 0.0

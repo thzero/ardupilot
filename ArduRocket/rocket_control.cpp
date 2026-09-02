@@ -67,6 +67,29 @@ const char *ArduRocket::stage_string() const
 #define RKT_LAND_RATE_MS  0.5f      // vertical speed treated as "at rest", m/s
 #define RKT_LAND_MS       3000u     // must hold this long
 
+// Tilt give-up backstop debounce and gyro corroboration.
+//
+// A real departure is a large tilt that is ALSO a real rotation of the airframe, held for
+// a while. Without GPS, the EKF attitude estimate can briefly glitch to a huge tilt during
+// the high-thrust boost or the low-speed apogee transition -- a spike in the ESTIMATE with
+// no matching motion on the raw gyro. So the backstop requires BOTH a sustained over-tilt
+// (RKT_GIVEUP_MS) AND that the raw gyro shows the airframe is genuinely rotating
+// (RKT_GIVEUP_RATE_DPS). A frozen estimate glitch fails the gyro test; a brief one fails the
+// long debounce. Neither can centre the fins mid-ascent on a phantom tilt.
+#define RKT_GIVEUP_MS       1000u    // over-tilt must hold this long (was 200)
+#define RKT_GIVEUP_RATE_DPS 25.0f    // ...AND the airframe must actually be rotating this fast
+
+// Direct spin-rate damper gain: yaw fin command = -RKT_SPIN_DAMP * spin_rate(rad/s), clamped
+// to +/-1. 0.10 commands full spin fin at ~5.7 rad/s (~570 deg/s), so it opposes the spin
+// hard well before it can run away. Applied only while steering (BOOST/COAST).
+#define RKT_SPIN_DAMP       0.10f
+
+// Direct tilt controller gains (fin = -RKT_TILT_P*angle - RKT_TILT_D*rate, angle/rate in
+// radians). RKT_TILT_P 4.0 -> full fin already at ~14 deg of lean, so the fins slam hard on
+// the whole 20 deg lean instead of creeping; RKT_TILT_D 0.3 damps the swing to stop overshoot.
+#define RKT_TILT_P          4.0f
+#define RKT_TILT_D          0.3f
+
 void ArduRocket::start_fin_check(bool on_rail)
 {
     fin_check_start_ms = AP_HAL::millis();
@@ -358,10 +381,11 @@ void ArduRocket::run_rocket_control()
         // stale confirmation cannot be used to arm.
         update_fin_check_validity();
         set_stage(FlightStage::PREP);
-    } else if (stage != FlightStage::LANDED) {
-        // LANDED is terminal until a manual disarm. The ascent detector only knows
-        // stages up to DESCENT, so once we have declared touchdown do not let it map
-        // the stage back to DESCENT.
+    } else if (stage != FlightStage::LANDED && stage != FlightStage::DESCENT) {
+        // DESCENT and LANDED are terminal (until touchdown / a manual disarm). The ascent
+        // detector only knows stages up to DESCENT and would otherwise map us back to
+        // BOOST/COAST -- which would undo a give-up-triggered DESCENT while the vehicle is
+        // still nominally ascending (see the tilt backstop below).
         switch (rkt.stage()) {
         case AP_Rocket::Stage::PRE_LAUNCH:
             set_stage(FlightStage::ARMED);
@@ -377,6 +401,51 @@ void ArduRocket::run_rocket_control()
             break;
         }
     }
+
+    /*
+      Tilt give-up backstop. While steering (BOOST/COAST), if the airframe has departed
+      more than RKT_GIVEUP_DEG from vertical, held for a short debounce, stop steering and
+      centre the fins by moving to DESCENT -- past that angle a fin-steered rocket has lost
+      authority and the fins would only flail. This complements the climb-rate apogee,
+      which can lag if the vehicle tumbles while still ascending. 0 disables. The mapping
+      guard above keeps this DESCENT from being reverted while climb rate is still positive.
+     */
+    if ((stage == FlightStage::BOOST || stage == FlightStage::COAST) &&
+        is_positive(g2.giveup_deg)) {
+        // Corroborate the tilt ESTIMATE with the raw gyro: a genuine departure past the
+        // give-up angle is a real rotation; an EKF attitude glitch is not. Requiring both
+        // (plus the long debounce) stops a single estimate spike from centering the fins.
+        const bool departed = tilt_from_vertical_deg() > g2.giveup_deg;
+        const bool rotating = degrees(ahrs.get_gyro().length()) > RKT_GIVEUP_RATE_DPS;
+        if (departed && rotating) {
+            if (giveup_start_ms == 0) {
+                giveup_start_ms = AP_HAL::millis();
+            } else if (AP_HAL::millis() - giveup_start_ms > RKT_GIVEUP_MS) {
+                gcs().send_text(MAV_SEVERITY_WARNING,
+                                "Rocket: tilt %.0f deg - giving up, fins centered",
+                                (double)tilt_from_vertical_deg());
+                set_stage(FlightStage::DESCENT);
+            }
+        } else {
+            giveup_start_ms = 0;
+        }
+    }
+
+    /*
+      Coast the attitude estimate on the gyro once launched. Under motor thrust (tens of g
+      along the nose) and under fin steering, the accelerometer measures those forces, not
+      gravity, so DCM must not use it as a "down" reference -- it would read the thrust/steer
+      acceleration as a tilt and corrupt the estimate (measured: a 20 deg lean read as ~6 deg
+      while the fins steered). On the pad (PREP/FINCHECK/ARMED) the accelerometer is left ON so
+      DCM aligns to true vertical from gravity; from BOOST through DESCENT it is gated OFF and
+      the gyro carries the attitude, which is accurate over the short flight. This is the
+      technique the flown MatrixPilot fin-steered rocket uses (rmat.c: accel correction only
+      while `launched == 0`).
+     */
+    const bool in_powered_flight = (stage == FlightStage::BOOST ||
+                                    stage == FlightStage::COAST ||
+                                    stage == FlightStage::DESCENT);
+    ahrs.set_attitude_gyro_only(in_powered_flight);
 
     switch (stage) {
 
@@ -431,10 +500,16 @@ void ArduRocket::run_rocket_control()
           gain the authority to fly it there. By RKT_LEVEL_Q the command is fully
           vertical and stays there for the rest of the flight.
 
-          Yaw is commanded as a RATE of zero rather than an angle. Spin about the
-          long axis is not something the vehicle cares about, and holding a yaw
-          angle would accumulate an error the fins would then fight. Resetting the
-          yaw target each loop keeps it tracking the measurement.
+          Spin (view yaw = roll about the long axis) MUST be actively controlled. Left
+          alone it runs away to ~1200 deg/s -- the spin inertia is ~240x smaller than the
+          tilt inertia, so a tiny roll torque spins it up fast -- and a fast spin combined
+          with a tilt is CONING, which systematically corrupts the DCM tilt estimate and
+          makes it impossible to fly vertical. An earlier version reset the yaw target to the
+          current heading every loop "so the fins would not fight a yaw error"; that snapped
+          the target onto the spinning measurement, forced the yaw error to zero, and so the
+          controller never opposed the spin at all. That was the bug. Instead we HOLD a yaw
+          heading (captured once on the rail, in ARMED) and let the controller fight any spin
+          back to it -- the "fighting" is the spin damping we want.
          */
         float to_vertical = 1.0f;   // 0 = hold rail attitude, 1 = true vertical
         if (is_positive(g2.level_q)) {
@@ -443,7 +518,11 @@ void ArduRocket::run_rocket_control()
         const float tgt_roll_rad  = rail_roll_rad  * (1.0f - to_vertical);
         const float tgt_pitch_rad = rail_pitch_rad * (1.0f - to_vertical);
 
-        attitude_control->reset_yaw_target_and_rate(false);
+        // Only track the heading on the rail (ARMED), where there is no spin to fight; in
+        // BOOST/COAST hold it, so the controller damps the spin instead of following it.
+        if (stage == FlightStage::ARMED) {
+            attitude_control->reset_yaw_target_and_rate(false);
+        }
         attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw_cd(
             degrees(tgt_roll_rad) * 100.0f,
             degrees(tgt_pitch_rad) * 100.0f,
@@ -512,4 +591,39 @@ void ArduRocket::run_rocket_control()
 
     // run the rate controllers and produce the fin demands
     attitude_control->rate_controller_run();
+
+    /*
+      Direct spin-rate damper, in the style of the flown MatrixPilot rocket. While steering
+      (BOOST/COAST) the airframe otherwise spins up to ~1200 deg/s -- the spin inertia is
+      ~240x smaller than the tilt inertia, so a tiny roll torque runs it away -- and that fast
+      spin plus a tilt is CONING, which systematically corrupts the tilt estimate and makes
+      vertical flight impossible. The cascade attitude controller does NOT drive the fins
+      against the spin (verified in SITL: spin unchanged by yaw-gain and yaw-mode changes), so
+      we command the spin fins DIRECTLY from the gyro instead: fin ~ -k * spin_rate. This
+      OVERRIDES the controller's yaw output (set after rate_controller_run). Spin about the
+      long axis shows up as the view's yaw rate, which the fin mixer's yaw channel commands.
+     */
+    if (stage == FlightStage::BOOST || stage == FlightStage::COAST) {
+        // Damp the spin about the long axis (body X = the nose). Sign matters and is subtle:
+        // a POSITIVE yaw fin command produces a positive roll torque (positive body-X spin),
+        // so to oppose a positive spin the command must be NEGATIVE -- hence -k * gyro.x on the
+        // raw body rate. (Using the view yaw rate here inverts the sign, because the pitch-90
+        // view makes view-yaw = -body-X-spin, which is the positive-feedback trap the cascade
+        // controller fell into and why the spin ran away.)
+        const float spin_rate = ahrs.get_gyro().x;              // rad/s, nose spin
+        motors->set_yaw(constrain_float(-RKT_SPIN_DAMP * spin_rate, -1.0f, 1.0f));
+
+        /*
+          Direct proportional+damping TILT control, overriding the ATC cascade. In the
+          ROTATION_PITCH_90 view a vertical rocket reads level, so view roll and view pitch ARE
+          the two tilt-from-vertical axes -- drive them to zero and the nose is vertical. The
+          cascade controller throttles this (its input shaping / integrator wind up so slowly
+          the fins barely move on a standing lean), so we command it straight, exactly like the
+          spin damper above and like the flown MatrixPilot rocket (P on the gravity vector).
+          fin = -Kp*angle - Kd*rate. The q gain schedule in the mixer still scales the output.
+         */
+        const Vector3f vg = ahrs_view->get_gyro();              // view-frame rates, rad/s
+        motors->set_roll (constrain_float(-RKT_TILT_P * ahrs_view->roll  - RKT_TILT_D * vg.x, -1.0f, 1.0f));
+        motors->set_pitch(constrain_float(-RKT_TILT_P * ahrs_view->pitch - RKT_TILT_D * vg.y, -1.0f, 1.0f));
+    }
 }

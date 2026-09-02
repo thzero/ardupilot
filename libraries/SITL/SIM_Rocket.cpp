@@ -372,19 +372,31 @@ void Rocket::update(const struct sitl_input &input)
      */
     if (!ignited) {
         rail_start_pos = position;
+        rail_speed = 0.0f;
+        rail_dist_m = 0.0f;
     }
     // Once the airframe has left the rail, the rail can never constrain it again --
     // latch on left_rail. Without this, the disarm at apogee resets `ignited` to false,
     // which would re-satisfy the `!ignited` term and freeze the airframe at apogee
     // instead of letting it fall, so it would never land.
-    const bool on_rail = !left_rail &&
-                         (!ignited || ((position - rail_start_pos).length() < rail_length_m));
+    const bool on_rail = !left_rail && (!ignited || rail_dist_m < rail_length_m);
     if (on_rail) {
         dcm = rail_dcm;
         gyro.zero();
-        // slide along the rail only; no sideways motion, and never backwards
         const Vector3f rail_dir = rail_dcm * Vector3f(1.0f, 0.0f, 0.0f);
-        velocity_ef = rail_dir * MAX(velocity_ef * rail_dir, 0.0f);
+        // Slide along the rail from the along-rail net force -- thrust (body X) minus the
+        // gravity component along the rail -- and FORCE position and velocity from that
+        // scalar. We must NOT reproject velocity_ef here: the base-class ground handling is
+        // active within frame_height (0.1 m) of the pad and zeros horizontal velocity every
+        // step, which on a TILTED rail bleeds the reprojected speed to zero (by cos^2 tilt
+        // per step) so the airframe never leaves the rail. A vertical rail has no horizontal
+        // component and was unaffected. Integrating the scalar rail speed makes the rail the
+        // sole authority during capture, so every launch angle behaves identically.
+        const float a_along = thrust / mass + (Vector3f(0.0f, 0.0f, GRAVITY_MSS) * rail_dir);
+        rail_speed = MAX(rail_speed + a_along * delta_time, 0.0f);
+        rail_dist_m += rail_speed * delta_time;
+        velocity_ef = rail_dir * rail_speed;
+        position = rail_start_pos + (rail_dir * rail_dist_m).todouble();
     } else if (!left_rail) {
         left_rail = true;
         /*

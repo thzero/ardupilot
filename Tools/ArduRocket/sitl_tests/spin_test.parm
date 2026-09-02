@@ -1,0 +1,16 @@
+# SPIN CONTROL test. Root cause of the vertical-flight failure: the airframe spins up to
+# ~1200 deg/s (spin inertia is ~240x smaller than tilt inertia, and the spin controller is
+# deliberately weak at ATC_RAT_YAW_P 0.10). That fast spin + the tilt = coning, which corrupts
+# the DCM tilt estimate (~13 deg) and makes the controller quit at ~20 deg.
+#
+# This cranks the yaw/spin rate controller up to actually hold spin near zero. The tilt gains
+# come from the baked defaults (6.0 / 0.24 / 0.01). Watch the report line:
+#   TRUE spin (roll about nose): mean X max Y deg/s
+#   want X, Y SMALL (tens of deg/s, not 1000+). If the spin drops, watch whether the est-vs-
+#   true `d` gap then collapses and the true tilt finally drives toward vertical.
+#
+# Load:  rocket_test.py gains --gains Tools/ArduRocket/sitl_tests/spin_test.parm
+# (Terminal 1: --model rocket-tilt20, plain.)
+ATC_RAT_YAW_P 0.40
+ATC_RAT_YAW_I 0.02
+ATC_RAT_YAW_D 0.02

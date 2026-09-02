@@ -152,6 +152,7 @@ private:
     bool     fin_check_on_rail;      // does the running wiggle count toward arming?
 
     uint32_t land_start_ms;          // touchdown debounce (DESCENT->LANDED); 0 = not settling
+    uint32_t giveup_start_ms;        // tilt give-up debounce (->DESCENT); 0 = within limits
 
     // rocket_control.cpp
     void run_fin_check();

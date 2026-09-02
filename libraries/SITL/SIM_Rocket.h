@@ -194,6 +194,8 @@ private:
     bool ignited;
     bool left_rail = false;
     Vector3d rail_start_pos;
+    float rail_speed = 0.0f;         // m/s along the rail while captured
+    float rail_dist_m = 0.0f;        // m travelled up the rail since ignition
 
     // Flight-event narration to the SITL console (apogee, landing), matching the
     // ignition / off-the-rail / burnout notes. Report-once latches, plus the peak

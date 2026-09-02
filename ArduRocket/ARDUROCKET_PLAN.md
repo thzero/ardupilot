@@ -21,7 +21,9 @@
 > - **`ATC_*` gains are the day-one placeholders, never tuned.** `MOT_Q_REF` has been
 >   tuned (600, by measurement — see §9), but the attitude gains have not. NOTE the
 >   plant they must be tuned against was corrected substantially (inertia, damping,
->   drag, fin authority — §9); any gain work predating that is void.
+>   drag, fin authority — §9); any gain work predating that is void. For a principled
+>   starting point (start gentle — full fin at ~40° tilt) and a tilt-based give-up
+>   backstop, see **Appendix B**, drawn from a flown fin-steered rocket.
 > - **Wind-limited, not gain-limited, near apogee.** At the 20 mph operational ceiling
 >   the airframe reaches ~15 deg off vertical late in coast because the tabs cannot
 >   out-muscle the wind at low q, not because the controller is failing. In calm air
@@ -564,44 +566,86 @@ threshold, where the fins genuinely have authority and are correcting a real tip
 speed bleeds off. It is control effort, not scheduling runaway. `RKT_MIN_Q` guards only
 the true zero-authority tail near apogee.
 
-## 3c. GPS: tracking only, never control
+## 3c. Attitude estimator: DCM on pure IMU, no GPS
 
-GPS is **fitted and polled, but kept out of the flight control solution.**
+The flight controller has **no GPS**, and attitude is estimated by **DCM, not EKF3**. This
+was the hardest single problem in the vehicle, resolved by a SITL investigation (the
+`Tools/ArduRocket/sitl_tests/` harness records estimate-vs-truth as a `d` column), and the
+reasoning is worth keeping.
 
-| | |
-|---|---|
-| **Purpose** | Recovery. Raw position goes to telemetry and the on-board log so the airframe can be found after it lands. |
-| **Enable/disable** | `GPS_TYPE` — standard, GCS-settable. `1` = auto-detect (default), `0` = off. |
-| **In the EKF?** | **No.** `EK3_SRC1_POSXY=0`, `EK3_SRC1_VELXY=0`, `EK3_SRC1_POSZ=1` (baro). |
+**The problem.** With no GPS there is no velocity reference, and without one an estimator
+cannot separate the vehicle's *own* acceleration from gravity. During boost the motor pulls
+tens of g along the nose, swamping the 1 g of gravity used to find "down". An estimator that
+assumes "big steady acceleration ≈ down" concludes the nose points more straight-up than it
+does, and **under-reads the tilt exactly when the fins have the most authority to correct it.**
 
-> ⚠️ **This exclusion was NOT actually in force until the EKF parameter group was
-> registered** (see the bug table). `EK3_*` parameters did not exist, so those three
-> lines in `rocket.parm` were silently discarded and the filter ran on defaults. If
-> you fork this vehicle, verify the settings you depend on actually *exist* — dump the
-> parameter list and grep for them — rather than trusting that a `.parm` line took.
-> The compass is separately excluded via `COMPASS_USE/2/3 = 0`; it is read only to
-> produce a display heading (see the heading section near the top).
+**EKF3 cannot do it without GPS.** Measured in SITL (est vs. sim truth):
+- Default EKF3: the tilt estimate glitched by up to **90°** — a phantom **117° tilt while the
+  true tilt was 30°** — which also tripped the give-up backstop on nothing.
+- Retuning its process noise (`EK3_ACC_P_NSE`→1.0, `EK3_GYRO_P_NSE`→0.003) removed the glitches
+  but left a **standing ~12° bias it could not shed**: trusting the accelerometer less to
+  survive boost also stops it re-levelling in coast. One static knob cannot do both.
 
-**Why it is excluded from control.** A GPS receiver loses lock under high-g boost and high
-dynamics — exactly the phase where control matters most. A dropout feeding the estimator
-mid-boost is far more dangerous than never trusting it. Attitude and climb rate (which
-apogee detection and the fin gain scheduling ride on) come from **baro + IMU alone**.
+The failure is **structural** — no velocity aiding to make tilt observable — not tuning.
 
-**It must be polled or it does nothing.** `AP_GPS::update` is in the scheduler at 50 Hz.
-`gps.init()` alone is not enough — without the periodic task the driver produces no fixes
-at all, which was the state before this was added.
+**DCM holds it**, the way the flown MatrixPilot fin-steered rocket did (`RollPitchYaw/main.c`:
+pure gyro + accelerometer; its GPS callback only blinks an LED). `AHRS_EKF_TYPE 0`. In SITL
+its tilt tracked truth within **~1–2°** for most of the flight with no glitches, because it
+corrects toward gravity *slowly* — it coasts on the gyro through the burn and re-levels after.
 
-**Consequences of no GPS in the EKF, all expected:**
-- There is **no position solution and therefore no home**. This is normal for this vehicle.
-- `GLOBAL_POSITION_INT` will not be valid — **use `GPS_RAW_INT` for tracking**, which is
-  the raw driver output and does not need an EKF origin.
+**What makes it work is a code gate, not just a parameter.** `AHRS_EKF_TYPE 0` selects DCM,
+but DCM alone still gets pulled off by the accelerometer under thrust and — worse — under fin
+steering, both of which the accelerometer reads as a tilt of gravity. The fix is the flown
+MatrixPilot rocket's exact technique: **stop using the accelerometer for attitude once
+launched, and coast on the gyro.** `rocket_control.cpp` calls `ahrs.set_attitude_gyro_only(true)`
+from BOOST through DESCENT; `AP_AHRS_DCM::drift_correction()` then zeroes the accel error term
+(killing both the P and I accelerometer corrections), leaving pure gyro. On the pad the gate is
+off, so DCM aligns to true vertical from gravity first. This mirrors `rmat.c`'s
+`if (acceleration < GRAVITY/4 && launched == 0)` gate. (A parameter cannot do this: ArduPilot
+clamps `AHRS_RP_P` to a 0.05 floor and the integral term isn't gated by it at all.)
+
+| Param | Value | Why |
+|---|---|---|
+| `AHRS_EKF_TYPE` | **0** (DCM) | Attitude from gyro+accel; EKF3 stays as a dormant fallback. |
+| `AHRS_RP_P` | **0.2** (default) | Only matters on the pad now — the gate removes the accelerometer entirely in flight — so it is left at the default for good pad alignment. (An earlier `0.05`, to slow the thrust pull, became unnecessary once the gate was added.) |
+
+**The limit found (and why it is partly a sim artifact).** With the accelerometer gated out,
+the estimate is clean when the fins are quiet but still shows ~14° between the FC's DCM and the
+*sim's* truth while the fins steer hard. That residual is **gyro-side** (confirmed: the gate is
+active, and SITL gyro noise is zero by default), and it is partly a measurement artifact: the
+`d` column compares two independent integrators of the same gyro — the FC's DCM and the sim's
+own attitude — which drift apart during fast dynamics. **On hardware there is no second
+integrator**; DCM *is* the attitude, it integrates the real gyro, and the airframe tracks it.
+So the real-flight steering error is expected to be smaller than the sim's `d` suggests.
+
+**GPS stays OFF (`GPS_TYPE 0`), not merely out of the estimator.** Two reasons:
+1. It isn't fitted, and a receiver loses lock under high-g boost anyway.
+2. **A present GPS corrupts DCM.** Its velocity feeds DCM's centripetal-acceleration
+   correction, which pollutes the tilt once the fins start steering — in SITL, GPS-present
+   made the estimate **diverge past 100°** while GPS-off held it within a few degrees.
+   `AHRS_GPS_USE=0` gates GPS *navigation* but not that correction, so it is not enough; the
+   receiver must be off. (`EK3_SRC1_*` are kept for the dormant EKF3 but are moot with GPS off.)
+
+**Vertical velocity** — needed by apogee detection and the fin gain schedule — then comes
+from the **barometer's filtered climb rate** automatically: with DCM primary and no GPS,
+`get_velocity_D(_, true)` → `get_vert_pos_rate_D()` falls back to `AP_Baro::get_climb_rate()`
+(a 7-point derivative filter). No code change was needed to feed it.
+
+> ⚠️ Historically the `EK3_SRC1_*` exclusion was silently dead until the EKF parameter group
+> was registered (see the bug table). If you fork this vehicle, dump the parameter list and
+> grep for the settings you depend on rather than trusting that a `.parm` line took. The
+> compass is separately excluded via `COMPASS_USE/2/3 = 0`; it is read only for a display
+> heading (see the heading section near the top).
+
+**Consequences, all expected:**
+- No position solution and therefore **no home** — normal for this vehicle.
+- `GLOBAL_POSITION_INT` is not valid. Finding the airframe after landing is an **off-board**
+  job (a separate recovery tracker), not the flight controller's.
 - Arming resets the height datum to the rail, so altitude and climb rate are rail-relative.
 
-**Pre-arm warning.** If the EKF ever *does* produce a horizontal position solution, arming
-emits `Rocket: EKF has a horizontal position solution - GPS should be tracking only`. It
-warns rather than refuses, because this is a configuration opinion rather than a hardware
-fault — but it says so every time, because the in-flight symptom would otherwise be
-baffling to diagnose.
+**Pre-arm warning.** If the estimator ever *does* produce a horizontal position solution,
+arming emits `Rocket: EKF has a horizontal position solution - GPS should be tracking only`
+— a warning, not a refusal, because the in-flight symptom would otherwise be baffling.
 
 ## 3d. Pad procedure (from a ground station)
 
@@ -1246,3 +1290,166 @@ Mostly mechanical: ~200 lines for the new mixer, ~40 for the SIM gimbal, a handf
 registration edits, and the `AP_MotorsRocketBase` refactor (which also tidies the fins
 class). The genuinely new work is tuning against a plant whose authority collapses to
 zero mid-flight.
+
+# APPENDIX B — Lessons from a flown fin-steered rocket (MatrixPilot RollPitchYaw)
+
+A cross-check against a controller that has actually flown: the **MatrixPilot / UAV
+DevBoard "RollPitchYaw" demo, repurposed for rocket fin stabilization**. A group flew it
+on boards SN1–SN6 between 2015 and 2019. It runs on a dsPIC (UDB4/5) at 40 Hz on a DCM
+attitude solution, IMU-only, GPLv3. Source read: `Rocket_Stabilization/RollPitchYaw/`
+(`main.c`, `mainRocket.c`, `options.h`).
+
+It is a much simpler controller than ArduRocket, but it is a real flown one, so where it
+agrees it is reassuring and where it differs it is worth a look.
+
+## B.1 What it confirms about our design
+
+| Aspect | MatrixPilot (flown) | ArduRocket | Verdict |
+|---|---|---|---|
+| Tilt sensing | DCM gravity-vector components `rmat[6..8]` fed straight in — never Euler angles | `AP_AHRS_View(ROTATION_PITCH_90)`, tilt read in the rotated view | **Same idea**, arrived at independently — singularity-free tilt |
+| Controller | pure **P** on tilt, plus **P** on spin rate; **no integrator** | P/D on attitude; integrators HELD on the rail, near-zero in flight | Aligned — a flown rocket needs no I term |
+| Fin mixing | `roll±pitch` / `roll±yaw` across the four fins | `AP_FinMixerRocket` antisymmetric pairs (tilt) + common (spin) | **Identical** — ours is the standard mix |
+| Sensors in the loop | IMU only: accel launch, tilt apogee, DCM+gyro steer; no baro/GPS | IMU + baro; GPS excluded from control by config | Aligned (we add baro only for climb-rate apogee) |
+| Spin | only damped above `MAX_SPIN_RATE = 500 °/s` | low spin priority, light damping | Aligned — don't fight spin hard |
+| At apogee | center the fins and stop steering | DESCENT centers fins, controller shut down (stays armed) | Aligned |
+
+The takeaway: our two most unusual choices — measuring tilt in a rotated view and running
+essentially P/D with no flight integrator — are exactly what a repeatedly-flown fin rocket
+does.
+
+## B.2 Proposal 1 — start the tilt gain GENTLE (full fin at ≈ 40° tilt)
+
+Their `MAX_TILT_ANGLE` is the tilt at which the fins reach full deflection. The instructive
+part is the **evolution across real flights**: early boards used **7.5°** (aggressive — full
+authority at a tiny tilt), and by the flown SN4–SN6 boards they had backed it all the way off
+to **40°**. That is a group de-tuning the gain over many flights because a high tilt gain
+over-controls and oscillates, and a gentle one holds.
+
+**Proposal:** when tuning `ATC_*`, **start gentle** — size the loop so the fins do not reach
+full deflection until the airframe is roughly **40° off vertical**, then tighten only if the
+response is sluggish. This matches the project's stated goal (hold vertical as long as
+possible; gentle is stable) and gives the tuning a principled starting point instead of a
+guess.
+
+Caveat on mapping: their controller is single-loop (`fin = gain × tilt`), while ArduRocket's
+is a cascade (`angle error → ATC_ANG_*_P → target rate → ATC_RAT_* → fin`), so there is no
+one-to-one gain to copy. The **saturation principle** is what transfers: in SITL, command a
+tilt step and check at what angle the fins saturate — aim for ~40°, not a few degrees. Turn
+`ATC_ANG_*_P` (and the rate gains) down until that holds, then work up.
+
+**Concrete starting point** (sized for full fin at ~40°; NO flight integrator). The cascade
+gives `fin ≈ ATC_ANG_P · angle_err · ATC_RAT_P`, so the `ANG_P·RAT_P` product ≈ 1.4 puts full
+deflection near 40° tilt (≈ half fin at a 20° lean):
+```
+ATC_ANG_RLL_P  6.0     ATC_ANG_PIT_P  6.0     (tilt angle -> target rate)
+ATC_RAT_RLL_P  0.24    ATC_RAT_PIT_P  0.24
+ATC_RAT_RLL_D  0.01    ATC_RAT_PIT_D  0.01
+ATC_RAT_RLL_I  0       ATC_RAT_PIT_I  0        (held in flight)
+```
+An earlier draft used `ANG_P 3.0 / RAT_P 0.05` — that product (0.15) yields only ~6% fin at a
+20° lean, far too weak to hold the gravity-turn, so the airframe tilted past the give-up angle
+and tumbled. These values are ~9× hotter to match the full-fin-at-40° intent.
+
+**Dialing procedure:**
+1. Arm on a **20°-tilted rail** (`rocket-tilt20`) — the maximum NAR/Tripoli launch angle, no
+   wind. Watch the fin outputs (`SERVO_OUTPUT_RAW`, or the `RKT` log fin field).
+2. Adjust so the fins sit at **~half deflection at the 20° lean** and are **not saturated**. A
+   gentle gain (full fin at ~40°) gives ~half at 20°; if they slam to the stops at 20° or a few
+   degrees, the gains are too high — come down. The actual full-fin-at-40° point is an *in-flight*
+   upset beyond the legal rail — probe it with the wind runs (stage 2/4) or `rocket-unstable`,
+   not by tilting the rail past 20°.
+3. Raise `ATC_ANG_*_P` until a step response first shows overshoot / oscillation, then back off
+   ~30%. That is the gentle baseline.
+4. Only then chase the wind-envelope numbers (§9): the goal is holding vertical as long as q
+   lasts, not a fast step.
+
+This is a **tuning task, no code change** — the `ATC_*` gains are runtime parameters.
+
+## B.2.1 Testing schedule (built-in SITL and MATLAB-in-the-loop)
+
+Both sims run the **same flight code**, so tune fast in one and cross-check the final gains in
+the other: if a gain set behaves the same on both plants it is not overfit to one plant's
+quirks — that is the whole reason to keep both.
+
+**Roles:**
+- **Built-in SITL** (`--model rocket`) — fast, real-time. Do the bulk of the tuning here:
+  parameter sweeps, step responses, wind runs.
+- **MATLAB-in-the-loop** (`--model JSON` + `rocket_sim`) — same controller, a plant you can
+  plot and inspect (the four live plots: tilt / q / fins / altitude). Use it to **confirm** the
+  final gains and to see *why* a run behaves as it does.
+
+**Stages — run each in built-in SITL first, then re-run the final candidate in MATLAB:**
+
+| # | Test | Setup | Pass criterion |
+|---|---|---|---|
+| 0 | Quiet on the rail | armed, vertical, no wind | fins centered, no chatter; integrators held |
+| 1 | Step response | arm on `rocket-tilt20` (MATLAB: `P.rail_tilt_deg = 20`) — max legal rail, no wind | fins ~half at the 20° lean (gentle = full at ~40°), not saturated; settles to vertical with ≤1 overshoot |
+| 2 | Disturbance rejection | vertical, 8 m/s crosswind (`SIM_WIND_*`) | holds within a few degrees while q is high; no oscillation |
+| 3 | Full flight | launch → boost → coast → apogee | tilt small through boost; degrades gracefully as q drains late in coast |
+| 4 | Wind envelope | sweep wind 0 → 20 mph (operational ceiling) | worst tilt tracks the §9 table (~15° at 20 mph); no divergence |
+
+**Wind caveat:** the MATLAB plant has **no wind model yet** (`rocket_step.m`: `vel_air = vel`),
+so stages **2 and 4 are built-in-SITL only**. Cross-check the wind-free stages (**0, 1, 3**) in
+MATLAB.
+
+**Cross-check rule:** once stage 4 passes in built-in SITL, re-run stages 0/1/3 in MATLAB with
+the same gains. Expect the same qualitative behaviour and similar worst-case tilt. Divergence
+means one plant is wrong (or the gains exploit a plant artefact) — investigate before trusting
+them; the MATLAB live plots show the mechanism.
+
+**"Done" looks like:** vertical held to a few degrees while dynamic pressure lasts, wind within
+the 20 mph limit, fins neither chattering nor saturating early — and the same result on both
+plants.
+
+## B.3 Proposal 2 — a tilt-angle apogee / give-up backstop
+
+Their apogee detection is **not** climb-rate — it is **tilt > 60° after launch → lock apogee,
+center the fins, stop steering** (`DETECT_APOGEE`; `rmat[7] < 8256` ≈ 60°). The reasoning: once
+a fin-steered rocket is more than ~60° off vertical it has lost the plot, so stop flailing the
+fins against a plant it can no longer control.
+
+ArduRocket detects apogee from **negative climb rate** (EKF), which is the right primary
+trigger. But it has **no backstop for losing control before apogee** — if the airframe departs
+and tumbles while still nominally ascending, climb-rate may stay positive for a while and the
+fins keep driving uselessly.
+
+**IMPLEMENTED (hardened).** A tilt-angle backstop: while steering (BOOST/COAST), if
+`tilt_from_vertical_deg()` exceeds **`RKT_GIVEUP_DEG`** (default **60°**, `0` = disabled) the
+controller announces `Rocket: tilt N deg - giving up` and moves to DESCENT — stop steering,
+centre the fins. It catches the "control lost before apogee" case the climb-rate test misses,
+and complements, not replaces, the climb-rate apogee.
+
+The trip is **corroborated**, because without GPS the EKF attitude estimate can briefly glitch
+to a huge tilt during the high-thrust boost or the low-speed apogee transition (a spike in the
+*estimate* with no matching motion on the raw gyro — see SITL, where a phantom 117° tilt tripped
+the original backstop while the true tilt was 30°). So the backstop now requires **both**:
+- the over-tilt held for **`RKT_GIVEUP_MS` = 1000 ms** (was 200 ms), and
+- the raw gyro showing the airframe is genuinely rotating, `|gyro| > RKT_GIVEUP_RATE_DPS` (25 °/s).
+
+A frozen estimate glitch fails the gyro test; a brief one fails the long debounce; a real
+tumble satisfies both. This is a **band-aid over the symptom** — the root cause is the
+attitude estimate degrading under high axial thrust with no GPS (accelerometer swamped by the
+motor, so it cannot serve as the gravity reference), which is a separate state-estimation task.
+
+Implementation note: the give-up DESCENT has to be made **sticky**. The ascent detector
+(`AP_Rocket`) only knows stages up to DESCENT, so while climb rate is still positive it would
+map the vehicle back to BOOST/COAST and undo the give-up. The stage-mapping guard in
+`run_rocket_control()` therefore skips remapping once `stage` is DESCENT **or** LANDED — both
+are terminal until touchdown / a manual disarm.
+
+## B.4 Proposal 3 (optional, future) — margin-based authority allocation
+
+Their `roll_feedback()` is more sophisticated than our mixer in one respect: it computes the
+fin-throw **left over** after the tilt commands and hands the remainder to spin, per axis, with
+explicit cases for which axis has margin. `AP_FinMixerRocket` does a simpler version (`rp_scale`
+reserves a fixed `yaw_headroom`; tilt wins ties). Ours is adequate — tilt is what matters and it
+gets priority — but if we ever see spin authority starved when tilt saturates, their
+margin-sharing scheme is the reference to copy.
+
+## B.5 Their flown configuration, for reference (SN5/SN6)
+
+`MAX_TILT_ANGLE 40°`, `MAX_TILT_PULSE_WIDTH 500 µs`, `MAX_SPIN_RATE 500 °/s`,
+`MAX_SPIN_PULSE_WIDTH 500 µs`, `GYRO_RANGE 1000 °/s`, 40 Hz loop, `DETECT_APOGEE` on,
+`NO_MIXING` (SN5 drove three separate control channels rather than mixing four fins). Note the
+gyro range: a rocket spins fast, so they ran ±1000 °/s — a reminder that gyro full-scale, like
+the ±32 g accel (§0), is a real hardware selection point.
