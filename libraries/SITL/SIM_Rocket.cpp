@@ -159,6 +159,18 @@ Rocket::Rocket(const char *frame_str) :
     if (p != nullptr) {
         rail_azimuth_deg = atof(p + 3);
     }
+    /*
+      Rail roll = airframe CLOCKING about its own long axis, e.g. "rocket-tilt5-roll45".
+      With tilt/azimuth fixed, this rotates the lean direction relative to the four body-fixed
+      fins: roll 0 leans straight onto one fin pair (the only case the rig produced before),
+      roll 45 leans into the diagonal BETWEEN two pairs. Sweeping it 0..90 (4-fold fin symmetry)
+      is how we prove the controller nulls a lean from any orientation, not just the head-on one.
+     */
+    float rail_roll_deg = 0.0f;
+    p = strstr(frame_str, "-roll");
+    if (p != nullptr) {
+        rail_roll_deg = atof(p + 5);
+    }
     // rail length, given in inches because that is how rails are sold
     p = strstr(frame_str, "-rail");
     if (p != nullptr) {
@@ -168,13 +180,15 @@ Rocket::Rocket(const char *frame_str) :
     /*
       Attitude the rail holds the airframe at. A nose-up rocket is pitch +90 (body
       X, the nose, pointing at NED -Z); tilting it off vertical by t degrees is
-      pitch (90 - t), and the yaw term chooses which way it leans.
+      pitch (90 - t), the yaw term chooses which compass way it leans, and the roll term
+      clocks the airframe (which fin the lean falls on).
      */
-    rail_dcm.from_euler(0.0f, radians(90.0f - rail_tilt_deg), radians(rail_azimuth_deg));
+    rail_dcm.from_euler(radians(rail_roll_deg), radians(90.0f - rail_tilt_deg),
+                        radians(rail_azimuth_deg));
 
-    ::printf("Rocket: rail %.1f in (%.3f m), tilt %.1f deg, azimuth %.0f deg\n",
+    ::printf("Rocket: rail %.1f in (%.3f m), tilt %.1f deg, azimuth %.0f deg, clock %.0f deg\n",
              (double)(rail_length_m / 0.0254f), (double)rail_length_m,
-             (double)rail_tilt_deg, (double)rail_azimuth_deg);
+             (double)rail_tilt_deg, (double)rail_azimuth_deg, (double)rail_roll_deg);
 
     recompute_fin_geometry();
 

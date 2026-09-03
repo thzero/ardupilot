@@ -238,6 +238,13 @@ Key parameter groups (all visible in the GCS parameter editor):
 | `ATC_*` | attitude controller (rate/angle PIDs) — **untuned placeholders** |
 | `SIM_RKT_*` | the SITL airframe (mass, motor, inertia, fin geometry, tab dimensions, drag) |
 
+**Estimator: DCM, no GPS** (`AHRS_EKF_TYPE 0`, **`GPS1_TYPE 0`** — note the `1`; the old
+`GPS_TYPE` name is silently ignored and leaves GPS on). Full rationale in PLAN §3c. In SITL these
+defaults only apply if the frame is registered in `Tools/autotest/pysim/vehicleinfo.json` *or* you
+launch with `--defaults Tools/autotest/default_params/rocket.parm`; otherwise the binary boots on
+firmware defaults (EKF3 + GPS on) and behaves like a different vehicle. `rocket_test.py` checks
+this at startup and refuses to run on the wrong estimator — trust that guard, not the `.parm` file.
+
 ### Before any real flight
 - **Fin check** must be run on the rail (unskippable via pre-arm), and fin **direction**
   confirmed by eye.
@@ -338,6 +345,9 @@ numbers above are placeholder guesses; replace them with your real measurements.
 - **[`ARDUROCKET_PLAN.md`](ARDUROCKET_PLAN.md)** — the design rationale and decision log:
   why each choice was made, the physics corrections, the bug history, verification results.
   This README links into its §-numbers for the "why."
+- **[`ARDUROCKET_STATUS.md`](ARDUROCKET_STATUS.md)** — the living "where are we" note: current
+  proven state and the short remaining TODO list. (This README = how to use it; PLAN = why it's
+  built this way; STATUS = what's done and what's next.)
 - **`Tools/ArduRocket/matlab/README.md`** — the MATLAB plant and JSON-bridge details.
 - A **thrust-vector-control (TVC)** variant is scoped but not implemented (PLAN Appendix A).
 

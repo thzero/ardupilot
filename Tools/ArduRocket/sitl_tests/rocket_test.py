@@ -161,6 +161,10 @@ def run(m, seconds):
     ascent_end = None         # abs time control stopped (apogee / give-up); metrics scope
     last_hb = 0
     while time.time() < t_end:
+        # Stop shortly after apogee/give-up: all graded (ascent) data is already captured, and the
+        # ballistic tumble is junk. Keeps sweeps fast without changing any metric.
+        if ascent_end is not None and time.time() - ascent_end > 1.5:
+            break
         if time.time() - last_hb > 0.5:
             m.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_GCS,
                                  mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
@@ -487,9 +491,18 @@ def main():
                            if tru is not None and a and tr <= 0.75 * a), default=0.0)
         tumbled = r["gaveup"] or powered_max > 60.0
         flew_vertical = steady_tilt is not None and steady_tilt < VERT_TARGET_DEG
+        # The launch lean = the true tilt while still on the rail / just off it (max over the
+        # first 15% of ascent). The "did the fins actually steer?" guard (fin_hi > 0.25) only
+        # makes sense if there WAS a lean to correct -- a truly vertical launch (no lean)
+        # correctly leaves the fins idle and must not be failed for it.
+        launch_lean = max((tru for (tr, _e, tru, _f) in traj
+                           if tru is not None and a and tr <= 0.15 * a), default=0.0)
+        fins_ok = (r["fin_hi"] > 0.25) or (launch_lean < 0.5)
         print(f"   steady TRUE tilt (MISSION: drive to < {VERT_TARGET_DEG:.0f}): {fmt(steady_tilt)} deg")
         print(f"   tumbled / gave up: {'YES' if tumbled else 'no'}")
-        ok = flew_vertical and (not tumbled) and (r["fin_hi"] > 0.25) and (not r["sat_lo"])
+        if launch_lean < 0.5:
+            print(f"   (launch lean {launch_lean:.1f} deg ~ vertical: fin-authority check waived)")
+        ok = flew_vertical and (not tumbled) and fins_ok and (not r["sat_lo"])
         print("   RESULT:", "PASS" if ok else "FAIL",
               "" if ok else f"(mission: fly VERTICAL -- true tilt driven below {VERT_TARGET_DEG:.0f} deg "
                             "and held through the powered flight; holding the launch lean is a FAIL)")

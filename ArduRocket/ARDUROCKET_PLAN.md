@@ -618,7 +618,7 @@ own attitude — which drift apart during fast dynamics. **On hardware there is 
 integrator**; DCM *is* the attitude, it integrates the real gyro, and the airframe tracks it.
 So the real-flight steering error is expected to be smaller than the sim's `d` suggests.
 
-**GPS stays OFF (`GPS_TYPE 0`), not merely out of the estimator.** Two reasons:
+**GPS stays OFF (`GPS1_TYPE 0`), not merely out of the estimator.** Two reasons:
 1. It isn't fitted, and a receiver loses lock under high-g boost anyway.
 2. **A present GPS corrupts DCM.** Its velocity feeds DCM's centripetal-acceleration
    correction, which pollutes the tilt once the fins start steering — in SITL, GPS-present
@@ -631,10 +631,22 @@ from the **barometer's filtered climb rate** automatically: with DCM primary and
 `get_velocity_D(_, true)` → `get_vert_pos_rate_D()` falls back to `AP_Baro::get_climb_rate()`
 (a 7-point derivative filter). No code change was needed to feed it.
 
-> ⚠️ Historically the `EK3_SRC1_*` exclusion was silently dead until the EKF parameter group
-> was registered (see the bug table). If you fork this vehicle, dump the parameter list and
-> grep for the settings you depend on rather than trusting that a `.parm` line took. The
-> compass is separately excluded via `COMPASS_USE/2/3 = 0`; it is read only for a display
+> ⚠️ **Two ways this exact config has silently NOT taken effect — verify it at runtime, do not
+> trust the `.parm` file.** `rocket_test.py` now reads `AHRS_EKF_TYPE` and `GPS1_TYPE` at startup
+> and refuses to run if either is wrong; do the equivalent (dump params, grep) on hardware.
+> 1. **Wrong param name.** The GPS type param is **`GPS1_TYPE`**, not the older `GPS_TYPE`. A
+>    `GPS_TYPE 0` line is silently discarded, GPS stays ON, and the DCM runs *with* GPS — which
+>    corrupts the tilt off-axis and looks exactly like an estimator bug. (Same silent-discard mode
+>    as the historically-dead `EK3_SRC1_*` before the EKF param group was registered — see the bug
+>    table. Grep the live param list for what you depend on.)
+> 2. **Defaults not loaded at all.** The raw `./build/sitl/bin/rocket --model <frame> -w` launch
+>    resolves `rocket.parm` from `@ROMFS/vehicleinfo.json` by **exact model-string match**. A frame
+>    not listed there (e.g. a new `-az`/`-roll` variant) falls back to firmware defaults
+>    (**EKF3 + GPS on**) and the no-GPS DCM never runs. Either register the frame in
+>    `Tools/autotest/pysim/vehicleinfo.json` (then `./waf configure --board sitl` to re-embed) or
+>    launch with `--defaults Tools/autotest/default_params/rocket.parm`.
+>
+> The compass is separately excluded via `COMPASS_USE/2/3 = 0`; it is read only for a display
 > heading (see the heading section near the top).
 
 **Consequences, all expected:**
@@ -1053,8 +1065,12 @@ with q while the scheduled control moment is held constant. 600 is the measured 
 | `rocket` | 72 in rail, vertical, stable |
 | `rocket-unstable` | CP ahead of CG — the hard plant, for adversarial testing |
 | `rocket-tilt10` | 10 deg off vertical (NAR/Tripoli cap is 20) |
-| `rocket-tilt10-az90` | 10 deg, leaning toward 90 deg azimuth |
+| `rocket-tilt10-az90` | 10 deg leaning toward 90 deg azimuth (earth heading — a no-op with GPS off) |
+| `rocket-tilt10-roll45` | 10 deg lean **clocked 45 deg** — falls on the DIAGONAL between fin pairs, not head-on onto one. This is the orientation variable that matters for a fin-steered rocket; `roll` = rail roll euler. |
 | `rocket-tilt10-rail48` | 10 deg, on a 48 in rail |
+
+Suffixes stack (`rocket-tilt5-roll45-az90`). Any `-az`/`-roll` combo is fine, but a combo not
+listed in `vehicleinfo.json` needs `--defaults …/rocket.parm` at launch (see §3c ⚠️).
 
 ## 9b. MATLAB plant, and the C++/MATLAB split
 
@@ -1092,6 +1108,16 @@ This script exists because hand transcription is exactly where the errors above 
 from; it makes the extraction deterministic and repeatable.
 
 ## 10. Verification
+
+**Orientation & launch-angle proof (`Tools/ArduRocket/sitl_tests/sweep.py`).** A headless-SITL
+matrix of **rail tilt × rail clock** (`-roll`, §9): clock 0 = lean onto a fin pair, 45 = the
+diagonal between pairs; 0→90° covers all 360° by 4-fold fin symmetry, and tilt spans the 0–5°
+realistic launch angle. Result — **every cell drives to vertical and holds ~0–2° true tilt**
+(incl. the diagonal, where both control axes correct at once). Run `python3 sweep.py`; it
+auto-retries and marks `P*` for a cell that only passes on retry (the known intermittent
+rail-departure spin blip, characterised by `rocket_test.py gains --spin`), `F` for a persistent
+failure. Azimuth is not swept: with GPS off the estimate and control are pure body-frame, so
+earth heading cannot affect the result.
 
 **SITL — status:**
 1. ✅ Full stage sequence `PREP → ARMED → BOOST → COAST → DESCENT → LANDED`, then manual disarm → PREP.
