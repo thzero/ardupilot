@@ -131,6 +131,28 @@ public:
      */
     AP_Float giveup_deg;
 
+    /*
+      Direct tilt-controller gains (BOOST/COAST). The ascent law overrides the ATC cascade with
+      fin = -TILT_P*view_angle - TILT_D*view_rate - TILT_I*integral(view_angle), q-scaled by the
+      mixer. P sizes the immediate correction (4.0 -> full fin near 14 deg lean); D damps the
+      swing; I nulls the steady weathercock lean that P alone balances at a nonzero tilt. IMAX
+      caps the integral's fin share (anti-windup). These were compile-time #defines -- now params
+      so the ascent tune is one visible, consistent, rebuild-free surface (the ATC_* gains do NOT
+      drive the ascent). Defaults are the flown tune.
+     */
+    AP_Float tilt_p;
+    AP_Float tilt_d;
+    AP_Float tilt_i;
+    AP_Float tilt_imax;
+
+    /*
+      Direct spin-rate damper gain (BOOST/COAST): yaw fin = -SPIN_DAMP*gyro.x, q-scaled. The
+      effective damping MOMENT is ~ SPIN_DAMP*MOT_Q_REF, so these two MUST track each other --
+      if MOT_Q_REF changes, rescale this by the inverse ratio or the spin chatters/runs. Default
+      0.042 is matched to MOT_Q_REF 12000.
+     */
+    AP_Float spin_damp;
+
     // Flight stage detection: launch gating and burnout shutdown.
     AP_Rocket rocket;
 

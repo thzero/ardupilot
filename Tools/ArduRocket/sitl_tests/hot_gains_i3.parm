@@ -1,0 +1,21 @@
+# Break the ~10 deg plateau. Diagnosis from log 135 (hot_gains_i2): at PEAK q (climb
+# ~386 m/s) the fins sat at 0.05 while the airframe held ~10 deg off vertical, and only
+# saturated at t=22-24 when q had collapsed and a moment was impossible. Two throttles were
+# starving the high-q window:
+#   1. ATC_RAT_*_IMAX 0.5 capped the integrator at half authority, so it could never wind
+#      in the deflection needed to beat the weathercock -> lift to 1.0.
+#   2. MOT_Q_REF 5000 vs a peak q ~89000 scaled the fins to ~6% at max q -> raise to 12000
+#      so the fins keep real authority exactly where they are most effective.
+# Also wind the integrator faster (I 0.6 -> 1.0). Expect: true tilt driven < 8 in the high-q
+# window with the fins NOT pinned at the stops there. If it oscillates, back I/P off.
+ATC_ANG_RLL_P 18.0
+ATC_ANG_PIT_P 18.0
+ATC_RAT_RLL_P 0.8
+ATC_RAT_PIT_P 0.8
+ATC_RAT_RLL_I 1.0
+ATC_RAT_PIT_I 1.0
+ATC_RAT_RLL_D 0.04
+ATC_RAT_PIT_D 0.04
+ATC_RAT_RLL_IMAX 1.0
+ATC_RAT_PIT_IMAX 1.0
+MOT_Q_REF 12000

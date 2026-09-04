@@ -127,7 +127,7 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     // @Units: Pa
     // @Range: 0 5000
     // @User: Standard
-    AP_GROUPINFO("RKT_LEVEL_Q", 3, ParametersG2, level_q, 600.0f),
+    AP_GROUPINFO("RKT_LEVEL_Q", 3, ParametersG2, level_q, 0.0f),
 
     // @Param: RKT_MIN_Q
     // @DisplayName: Dynamic pressure below which fins stop being driven
@@ -144,6 +144,41 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     // @Range: 30 90
     // @User: Standard
     AP_GROUPINFO("RKT_GIVEUP_DEG", 5, ParametersG2, giveup_deg, 60.0f),
+
+    // @Param: RKT_TILT_P
+    // @DisplayName: Tilt controller proportional gain
+    // @Description: Direct tilt-law P gain (BOOST/COAST): fin = -TILT_P*view_angle - TILT_D*view_rate - TILT_I*integral, q-scaled by the mixer. 4.0 puts full fin near 14 deg of lean. This is the ascent tune; the ATC_* gains do not drive the ascent.
+    // @Range: 0 20
+    // @User: Standard
+    AP_GROUPINFO("RKT_TILT_P", 6, ParametersG2, tilt_p, 4.0f),
+
+    // @Param: RKT_TILT_D
+    // @DisplayName: Tilt controller rate gain
+    // @Description: Direct tilt-law D gain (BOOST/COAST), on the view-frame body rate. Damps the correction swing to stop overshoot.
+    // @Range: 0 2
+    // @User: Standard
+    AP_GROUPINFO("RKT_TILT_D", 7, ParametersG2, tilt_d, 0.3f),
+
+    // @Param: RKT_TILT_I
+    // @DisplayName: Tilt controller integral gain
+    // @Description: Direct tilt-law I gain (BOOST/COAST). PD alone balances the steady weathercock/gravity-turn moment at a nonzero tilt; the integral accumulates that residual lean and drives the STEADY tilt to zero. 0 disables (PD only).
+    // @Range: 0 5
+    // @User: Standard
+    AP_GROUPINFO("RKT_TILT_I", 8, ParametersG2, tilt_i, 2.0f),
+
+    // @Param: RKT_TILT_IMAX
+    // @DisplayName: Tilt integral limit
+    // @Description: Anti-windup cap on the tilt integral's fin contribution (0..1 fin units). Bounds how much of the fin the integral alone can command.
+    // @Range: 0 1
+    // @User: Standard
+    AP_GROUPINFO("RKT_TILT_IMAX", 9, ParametersG2, tilt_imax, 0.6f),
+
+    // @Param: RKT_SPIN_DAMP
+    // @DisplayName: Spin-rate damper gain
+    // @Description: Direct spin damper (BOOST/COAST): yaw fin = -SPIN_DAMP*gyro.x, q-scaled. The effective damping moment is ~SPIN_DAMP*MOT_Q_REF, so change this together with MOT_Q_REF (rescale by the inverse ratio) or the spin will chatter or run away. 0.042 is matched to MOT_Q_REF 12000.
+    // @Range: 0 0.5
+    // @User: Standard
+    AP_GROUPINFO("RKT_SPIN_DAMP", 10, ParametersG2, spin_damp, 0.042f),
 
     // @Group: RKT_
     // @Path: ../libraries/AP_Rocket/AP_Rocket.cpp
@@ -168,9 +203,69 @@ ParametersG2::ParametersG2(void)
     AP_Param::setup_object_defaults(this, var_info);
 }
 
+/*
+  The COMPLETE ArduRocket config baked as firmware defaults, for UTTER CONSISTENCY: a wipe (-w),
+  a fresh flash, or an UNREGISTERED SITL model (one not in vehicleinfo.json, e.g. rocket-tilt0 or
+  a new -az/-roll variant -- which otherwise falls back to generic firmware defaults: EKF3+GPS,
+  no fins, wrong q-schedule) all boot the IDENTICAL, flyable rocket. rocket.parm mirrors this and
+  stays the human-editable source; these two MUST stay in sync (rocket.parm still layers on top
+  for registered models via ROMFS, and for sim_vehicle). Ascent TUNING is not duplicated here --
+  it lives in real params with their own defaults: RKT_TILT_P/D/I, RKT_TILT_IMAX, RKT_SPIN_DAMP
+  (ParametersG2), RKT_LEVEL_Q/MIN_Q, and MOT_Q_REF below. NOTE: GPS1_TYPE, not GPS_TYPE.
+ */
+static const struct AP_Param::defaults_table_struct rocket_defaults[] = {
+    // estimator: no-GPS DCM (architecture -- silent + dangerous if wrong)
+    { "AHRS_EKF_TYPE",  0 },   // DCM, not EKF3
+    { "EK3_SRC1_POSXY", 0 },   // no horizontal position/velocity source (no GPS)
+    { "EK3_SRC1_VELXY", 0 },
+    { "EK3_SRC1_POSZ",  1 },   // baro for vertical, which is all the rocket uses
+    { "COMPASS_USE",    0 },   // magnetometer out of the solution
+    { "COMPASS_USE2",   0 },
+    { "COMPASS_USE3",   0 },
+    // fin outputs, no RC, self-managed arming
+    { "SERVO1_FUNCTION", 190 },   // the four fins are motor outputs 190..193
+    { "SERVO2_FUNCTION", 191 },
+    { "SERVO3_FUNCTION", 192 },
+    { "SERVO4_FUNCTION", 193 },
+    { "RC_PROTOCOLS",    0 },      // no receiver is ever attached
+    { "ARMING_SKIPCHK", -1 },     // the rocket gates arming itself (fin check + rail)
+    { "RKT_ENABLE",   1 },        // the flight-stage detector
+    // MOT_* and ATC_* are NOT here: their objects (motors / attitude_control) are allocated in
+    // allocate_motors() AFTER load_parameters(), so their params don't exist yet and baking them
+    // here hard-errors (Config Error: param deflt fail). They go in rocket_late_defaults[],
+    // applied by apply_late_defaults() once allocation is done. GPS1_TYPE likewise (AP_GPS::init
+    // re-defaults it) is forced after gps.init() in init_ardupilot().
+};
+
+/*
+  Defaults for params whose objects are allocated AFTER load_parameters() -- the fin mixer
+  (MOT_*) and the attitude controller (ATC_*). apply_late_defaults() sets these once
+  allocate_motors() has created them.
+ */
+static const struct AP_Param::defaults_table_struct rocket_late_defaults[] = {
+    // the fin q-schedule: the key ascent-authority knob; pairs with RKT_SPIN_DAMP (move together)
+    { "MOT_Q_REF", 12000 },
+    // ATC cascade gains: used ONLY on the rail (ARMED); in BOOST/COAST the direct tilt/spin law
+    // (RKT_TILT_*, RKT_SPIN_DAMP) overrides the cascade, so these do NOT drive the ascent. Baked
+    // only so the full param set is identical on every model (registered or not).
+    { "ATC_RAT_RLL_P", 0.8 }, { "ATC_RAT_RLL_I", 0.6 }, { "ATC_RAT_RLL_D", 0.04 },
+    { "ATC_RAT_PIT_P", 0.8 }, { "ATC_RAT_PIT_I", 0.6 }, { "ATC_RAT_PIT_D", 0.04 },
+    { "ATC_RAT_YAW_P", 0.1 }, { "ATC_RAT_YAW_I", 0.01 },
+    { "ATC_ANG_RLL_P", 18 },  { "ATC_ANG_PIT_P", 18 },  { "ATC_ANG_YAW_P", 2 },
+};
+
+void ArduRocket::apply_late_defaults(void)
+{
+    AP_Param::set_defaults_from_table(rocket_late_defaults, ARRAY_SIZE(rocket_late_defaults));
+}
+
 void ArduRocket::load_parameters(void)
 {
     AP_Vehicle::load_parameters(g.format_version, Parameters::k_format_version);
+
+    // Force the no-GPS DCM architecture regardless of what is (or isn't) in storage. Must run
+    // before init_ardupilot()'s ahrs.init()/gps.init()/compass().init(), which read these.
+    AP_Param::set_defaults_from_table(rocket_defaults, ARRAY_SIZE(rocket_defaults));
 
     // setup AP_Param frame type flags
     AP_Param::set_frame_type_flags(AP_PARAM_FRAME_ROCKET);

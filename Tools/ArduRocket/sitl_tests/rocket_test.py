@@ -25,8 +25,11 @@ USAGE (start SITL first, in another terminal):
 Connect: tcp:127.0.0.1:5760 by default (--url to change, e.g. the WSL IP from Windows).
 """
 import argparse
+import glob
 import math
 import os
+import subprocess
+import sys
 import time
 from pymavlink import mavutil
 
@@ -34,6 +37,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GENTLE = os.path.join(HERE, "gentle_gains.parm")
 
 MPH = 0.44704   # mph -> m/s
+
+
+def plot_latest_log():
+    """Open the real-plot view (rocket_plot.py) on the newest dataflash log -- the flight
+    we just flew. SITL keeps the log open, so give it a moment to flush the tail first.
+    Launched detached so it does not block this script (the plot window lives on its own)."""
+    root = os.path.abspath(os.path.join(HERE, "..", "..", ".."))   # repo root
+    logs = sorted(glob.glob(os.path.join(root, "logs", "*.BIN")), key=os.path.getmtime)
+    if not logs:
+        print("   --plot: no logs/*.BIN found to plot")
+        return
+    print("   --plot: letting SITL flush the log tail...")
+    time.sleep(2.0)
+    plotter = os.path.join(HERE, "rocket_plot.py")
+    print(f"   --plot: opening {os.path.basename(logs[-1])} in rocket_plot.py")
+    subprocess.Popen([sys.executable, plotter, logs[-1]])
 
 
 def connect(url):
@@ -399,6 +418,9 @@ def main():
     ap.add_argument("--reboot", action="store_true",
                     help="reboot the FC after loading params (needed for boot-time params "
                          "like AHRS_EKF_TYPE / GPS_TYPE to take effect), then reconnect")
+    ap.add_argument("--plot", action="store_true",
+                    help="after the run, open rocket_plot.py on the newest log (real 3D path "
+                         "+ per-axis attitude, not ASCII)")
     args = ap.parse_args()
 
     m = connect(args.url)
@@ -450,22 +472,22 @@ def main():
             print(f"  -> for {mph} mph: python3 rocket_test.py wind --mph {mph}")
 
     elif args.scenario == "gains":
-        # THE MISSION IS TO FLY VERTICAL. Grade whether the airframe was actually driven to and
-        # HELD near 0 deg off vertical through the powered flight -- NOT whether it merely held
-        # its launch lean without tumbling. Measure the median TRUE tilt over the steady window
-        # (skip the launch transient and the apogee tail, where q collapses and the fins lose
-        # authority to the gravity turn). PASS requires that median below RKT_VERT_TARGET_DEG.
-        # Right now this FAILS: the airframe holds ~20 deg because the steering-induced estimate
-        # error fools the controller into thinking it is near vertical and easing off. Fixing
-        # that (so true, not just est, reaches vertical) is the open work -- do not paper over
-        # it by relaxing this bar. Start SITL: --model rocket-tilt20.
+        # THE MISSION IS TO FLY VERTICAL. Grade whether the TRUE attitude was actually driven to
+        # and HELD near 0 deg off vertical through the powered flight -- NOT whether it merely
+        # held its launch lean. Measure the median TRUE tilt over the steady window (skip the
+        # launch transient and the apogee tail, where q collapses and the fins lose authority to
+        # the gravity turn). PASS requires that median below VERT_TARGET_DEG.
+        #
+        # The ascent tune is the RKT_TILT_P/D/I + RKT_SPIN_DAMP params and MOT_Q_REF -- all baked
+        # firmware defaults now. The ATC_* gains do NOT drive the ascent (the direct law overrides
+        # the cascade in BOOST/COAST), so NO gains file is loaded by default; the baked config
+        # flies as-is. Pass --gains FILE only to experiment with the RKT_*/MOT_ knobs.
+        # Start SITL: --model rocket-tilt20.
         VERT_TARGET_DEG = 8.0
-        if not args.gains:
-            load_params(m, GENTLE)          # default to gentle_gains.parm next to this script
         set_param(m, "SIM_WIND_SPD", 0.0)
         force_arm(m)
         r = run(m, 30)
-        report("GENTLE GAINS (20 deg rail)", r)
+        report("VERTICAL (20 deg rail)", r)
         if args.spin:
             print_spin_transient(r["truerates"], ascent_rel=r.get("ascent_rel"))
         if args.axes:
@@ -519,6 +541,12 @@ def main():
         r = run(m, 15)
         report("GIVE-UP BACKSTOP", r, "expect: 'giving up' fires on the real tumble -> DESCENT")
         print("   RESULT:", "PASS" if r["gaveup"] else "FAIL (give-up did not fire)")
+
+    if args.plot:
+        if args.scenario == "sweep":
+            print("   --plot: 'sweep' does not fly here; skipping plot")
+        else:
+            plot_latest_log()
 
 
 if __name__ == "__main__":

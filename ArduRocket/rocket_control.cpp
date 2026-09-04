@@ -79,16 +79,12 @@ const char *ArduRocket::stage_string() const
 #define RKT_GIVEUP_MS       1000u    // over-tilt must hold this long (was 200)
 #define RKT_GIVEUP_RATE_DPS 25.0f    // ...AND the airframe must actually be rotating this fast
 
-// Direct spin-rate damper gain: yaw fin command = -RKT_SPIN_DAMP * spin_rate(rad/s), clamped
-// to +/-1. 0.10 commands full spin fin at ~5.7 rad/s (~570 deg/s), so it opposes the spin
-// hard well before it can run away. Applied only while steering (BOOST/COAST).
-#define RKT_SPIN_DAMP       0.10f
-
-// Direct tilt controller gains (fin = -RKT_TILT_P*angle - RKT_TILT_D*rate, angle/rate in
-// radians). RKT_TILT_P 4.0 -> full fin already at ~14 deg of lean, so the fins slam hard on
-// the whole 20 deg lean instead of creeping; RKT_TILT_D 0.3 damps the swing to stop overshoot.
-#define RKT_TILT_P          4.0f
-#define RKT_TILT_D          0.3f
+// The direct ascent-control gains -- tilt P/D/I(+IMAX) and the spin damper -- are now runtime
+// parameters (RKT_TILT_P/D/I, RKT_TILT_IMAX, RKT_SPIN_DAMP; see Parameters.cpp for the docs and
+// defaults). They were compile-time #defines; promoting them makes the ascent tune one visible,
+// consistent, rebuild-free surface. Read below as g2.tilt_p / g2.spin_damp etc. Coupling to keep
+// in mind: the spin damper's effective MOMENT is ~ RKT_SPIN_DAMP * MOT_Q_REF, so those two move
+// together (rescale one if the other changes) or the spin chatters / runs away.
 
 void ArduRocket::start_fin_check(bool on_rail)
 {
@@ -611,7 +607,7 @@ void ArduRocket::run_rocket_control()
         // view makes view-yaw = -body-X-spin, which is the positive-feedback trap the cascade
         // controller fell into and why the spin ran away.)
         const float spin_rate = ahrs.get_gyro().x;              // rad/s, nose spin
-        motors->set_yaw(constrain_float(-RKT_SPIN_DAMP * spin_rate, -1.0f, 1.0f));
+        motors->set_yaw(constrain_float(-g2.spin_damp * spin_rate, -1.0f, 1.0f));
 
         /*
           Direct proportional+damping TILT control, overriding the ATC cascade. In the
@@ -620,10 +616,35 @@ void ArduRocket::run_rocket_control()
           cascade controller throttles this (its input shaping / integrator wind up so slowly
           the fins barely move on a standing lean), so we command it straight, exactly like the
           spin damper above and like the flown MatrixPilot rocket (P on the gravity vector).
-          fin = -Kp*angle - Kd*rate. The q gain schedule in the mixer still scales the output.
+          fin = -Kp*angle - Kd*rate - Ki*integral(angle). The integral is what actually reaches
+          vertical: PD alone balances the steady weathercock moment at a nonzero lean, and with
+          20 s of coast airflow that residual should be nulled, not held. The q gain schedule in
+          the mixer still scales the output.
          */
         const Vector3f vg = ahrs_view->get_gyro();              // view-frame rates, rad/s
-        motors->set_roll (constrain_float(-RKT_TILT_P * ahrs_view->roll  - RKT_TILT_D * vg.x, -1.0f, 1.0f));
-        motors->set_pitch(constrain_float(-RKT_TILT_P * ahrs_view->pitch - RKT_TILT_D * vg.y, -1.0f, 1.0f));
+
+        // Integrate the residual lean and cancel the steady weathercock bias that PD alone
+        // leaves. dt = the fast-loop period (this runs as a FAST_TASK). The integral is clamped
+        // so its fin contribution stays within +/-RKT_TILT_IMAX (anti-windup); it is zeroed on
+        // the rail (the else below) so it always starts fresh at launch.
+        const float ki = g2.tilt_i;
+        const float dt = scheduler.get_loop_period_s();
+        if (ki > 0.0f) {
+            const float i_clamp = g2.tilt_imax / ki;            // bound on the integral itself
+            tilt_i_roll  = constrain_float(tilt_i_roll  + ahrs_view->roll  * dt, -i_clamp, i_clamp);
+            tilt_i_pitch = constrain_float(tilt_i_pitch + ahrs_view->pitch * dt, -i_clamp, i_clamp);
+        } else {
+            tilt_i_roll = tilt_i_pitch = 0.0f;   // integral disabled
+        }
+
+        motors->set_roll (constrain_float(-g2.tilt_p * ahrs_view->roll  - g2.tilt_d * vg.x
+                                          - ki * tilt_i_roll,  -1.0f, 1.0f));
+        motors->set_pitch(constrain_float(-g2.tilt_p * ahrs_view->pitch - g2.tilt_d * vg.y
+                                          - ki * tilt_i_pitch, -1.0f, 1.0f));
+    } else {
+        // Not steering (on the rail in ARMED, no airflow): hold the tilt integrator at zero so
+        // it cannot wind up against a constraint it can't beat, and starts clean at launch.
+        tilt_i_roll  = 0.0f;
+        tilt_i_pitch = 0.0f;
     }
 }

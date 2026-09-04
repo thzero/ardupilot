@@ -121,6 +121,16 @@ private:
     float rail_pitch_rad;
 
     /*
+      Integral state for the direct tilt law (view roll/pitch, rad*s). The ascent law is
+      otherwise pure PD, which against the steady weathercock/gravity-turn moment settles at a
+      nonzero tilt (Kp*tilt balances the disturbance). The integral accumulates the leftover
+      lean and drives the STEADY tilt to zero. Reset on the rail (ARMED) and integrated only
+      while steering (BOOST/COAST); clamped to RKT_TILT_IMAX for anti-windup.
+     */
+    float tilt_i_roll;
+    float tilt_i_pitch;
+
+    /*
       Pre-arm fin check. Fin DIRECTION cannot be verified in software: with the
       airframe clamped and no airflow there is no motion to observe, and comparing
       the mixer output against measured attitude is circular. So instead of
@@ -250,6 +260,9 @@ private:
 
     // Parameters.cpp
     void load_parameters(void) override;
+    // Firmware defaults for params whose objects are allocated AFTER load_parameters()
+    // (motors / attitude_control). Called from init_ardupilot() once they exist.
+    void apply_late_defaults(void);
 
     // system.cpp
     void init_ardupilot() override;

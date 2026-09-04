@@ -38,15 +38,26 @@ void ArduRocket::init_ardupilot()
     // allocate the control objects before anything tries to use them
     allocate_motors();
 
+    // Now that motors (MOT_*) and attitude_control (ATC_*) exist, bake their firmware defaults.
+    // Must be after allocate_motors() (the params don't exist before it) and is placed after the
+    // reload below so nothing re-clobbers them. See apply_late_defaults() in Parameters.cpp.
     // reload lines from the defaults file that may now be accessible
     AP_Param::reload_defaults_file(true);
     AP_Param::invalidate_count();
+    apply_late_defaults();
 
     // setup the 'main loop is dead' check
     hal.scheduler->register_timer_failsafe(failsafe_check_static, 1000);
 
     gps.set_log_gps_bit(MASK_LOG_GPS);
     gps.init();
+    // Force GPS OFF as the vehicle default. This MUST be after gps.init(): AP_GPS::init()
+    // re-defaults the type to HAL_GPS1_TYPE_DEFAULT (1 = auto), which would otherwise clobber
+    // it. GPS out of the flight solution is ArduRocket architecture, not tuning -- a stray GPS
+    // correction glitches the DCM tilt off-axis (AHRS_GPS_USE=0 does NOT gate it; GPS1_TYPE 0
+    // does). Set as a DEFAULT, so an operator can still explicitly enable a GPS for
+    // tracking/recovery by setting GPS1_TYPE in storage.
+    AP_Param::set_default_by_name("GPS1_TYPE", 0);
 
     AP::compass().init();
 
