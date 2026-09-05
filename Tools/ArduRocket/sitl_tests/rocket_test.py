@@ -408,6 +408,10 @@ def main():
                     choices=["quiet", "step", "wind", "flight", "sweep", "giveup", "gains"])
     ap.add_argument("--url", default="tcp:127.0.0.1:5760")
     ap.add_argument("--mph", type=float, default=8.0, help="crosswind for 'wind'")
+    ap.add_argument("--wind", type=float, default=0.0,
+                    help="crosswind (mph) to apply in the graded 'gains' scenario (0 = still air)")
+    ap.add_argument("--wind-dir", type=float, default=90.0, dest="wind_dir",
+                    help="wind direction (deg) for 'gains' --wind and for 'wind'")
     ap.add_argument("--gains", metavar="FILE",
                     help="load this .parm before flying (any scenario)")
     ap.add_argument("--axes", action="store_true",
@@ -450,9 +454,9 @@ def main():
 
     elif args.scenario == "wind":
         # Stage 2: vertical, crosswind. Start SITL: --model rocket.
-        set_wind(m, args.mph)
+        set_wind(m, args.mph, args.wind_dir)
         force_arm(m)
-        report(f"WIND {args.mph:.0f} mph", run(m, 30),
+        report(f"WIND {args.mph:.0f} mph @ {args.wind_dir:.0f} deg", run(m, 30),
                "expect: holds within a few deg while fast; no oscillation")
 
     elif args.scenario == "flight":
@@ -482,8 +486,13 @@ def main():
         # the cascade in BOOST/COAST), so NO gains file is loaded by default; the baked config
         # flies as-is. Pass --gains FILE only to experiment with the RKT_*/MOT_ knobs.
         # Start SITL: --model rocket-tilt20.
-        VERT_TARGET_DEG = 8.0
-        set_param(m, "SIM_WIND_SPD", 0.0)
+        VERT_TARGET_DEG = 2.0   # steady-tilt pass bar (deg off vertical). Tightened 8 -> 2: the
+                                # fixed-gain rocket holds ~0.5 deg, so 8 was meaningless. A
+                                # starting bar; tighten further, or add a transient bound, as needed.
+        if args.wind > 0:
+            set_wind(m, args.wind, args.wind_dir)   # graded flight WITH a crosswind (Monte Carlo)
+        else:
+            set_param(m, "SIM_WIND_SPD", 0.0)
         force_arm(m)
         # 36 s, not 30: the run clock includes the ~3 s on-rail ignition delay, and fixed gain
         # flies more vertically -> higher -> apogee near 30-31 s of run time. At 30 s the run
