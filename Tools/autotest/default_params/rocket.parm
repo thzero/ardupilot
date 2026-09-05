@@ -54,18 +54,22 @@ RKT_APOG_MS      500
 # everything above rail exit) -> 600 -> 2500 -> 5000 -> 12000.
 #
 # 12000: paired with the tilt-law INTEGRAL term (RKT_TILT_I) and the spin damper gain
-# (RKT_SPIN_DAMP, compile-time in rocket_control.cpp). At 5000 the direct tilt law only drove
+# (RKT_SPIN_DAMP) -- both runtime params now (ParametersG2). At 5000 the direct tilt law only drove
 # the steady TRUE tilt to ~6 deg off a 20-deg rail; at 12000 the fins keep near-full authority
 # through boost q and the integral nulls the residual weathercock lean -> steady TRUE tilt ~1.3
 # deg (mission PASS). RKT_SPIN_DAMP was set to 0.042 = 0.10*5000/12000 to keep the spin MOMENT
 # loop-gain constant as this rose, so the two MUST move together -- if you change MOT_Q_REF,
 # rescale RKT_SPIN_DAMP by the inverse ratio or the spin will chatter (5 Hz limit cycle) or run.
-MOT_Q_REF        12000
+#
+# SINGLE SOURCE: the authoritative default (12000) lives in ArduRocket/Parameters.cpp
+# (rocket_late_defaults[]) so every launch -- registered model, unregistered model, or bare -w --
+# gets it identically. It is intentionally NOT set here; edit it there, or as the live MOT_Q_REF
+# param. This comment is the rationale only.
 
-# Upper bound on the low-q gain boost. This cannot create authority: the output
-# clips at +/-1 regardless, so the hard ceiling is Kf/|Ka| of angle of attack --
-# about 11 deg for this airframe at 2 calibers of static margin.
-MOT_GAIN_MAX     4
+# MOT_GAIN_MAX is baked in ArduRocket/Parameters.cpp (rocket_late_defaults), not set here:
+# under fixed gain (RKT_QSCHED=0, the default) it is the constant mixer scale (1.0); under the
+# RKT_QSCHED=1 fallback schedule it is the low-q boost cap (~4, see scheduled.parm). Single source
+# in C++ so every launch is identical.
 
 # --- Attitude control -------------------------------------------------------
 # SITL-tuned tilt gains (not yet flown). With the spin killed and the estimate clean (see the

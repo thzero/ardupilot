@@ -185,11 +185,13 @@ def main():
     else:
         steady_tilt = float("nan")
     horiz = np.hypot(east[apogee_i] - east[0], north[apogee_i] - north[0])  # downrange at apogee
+    tilt_str = (f"steady tilt ~{steady_tilt:.1f}deg off vertical"
+                if np.isfinite(steady_tilt) else "no steady ascent to grade")
     fig = plt.figure(figsize=(16, 19))
     fig.suptitle(
         f"ArduRocket flight  --  {os.path.basename(path)}   "
         f"(apogee {up[apogee_i]:.0f} m @ {ts[apogee_i]:.1f} s, flight {ts[-1]:.1f} s,  "
-        f"steady tilt ~{steady_tilt:.1f}deg off vertical,  {horiz:.0f} m downrange)",
+        f"{tilt_str},  {horiz:.0f} m downrange)",
         fontsize=13, fontweight="bold",
     )
     gs = fig.add_gridspec(5, 3, hspace=0.5, wspace=0.28)

@@ -1,0 +1,12 @@
+# EXPERIMENT: MatrixPilot-style FIXED gain -- no dynamic-pressure schedule.
+# RKT_QSCHED 0 makes the mixer run at a constant scale (MOT_GAIN_MAX); the aerodynamic moment
+# then scales with real airspeed on its own, exactly like the flown MatrixPilot rocket. The
+# question: does a fixed gain drive a 20-deg rail to vertical without oscillating at boost q?
+RKT_QSCHED     0
+MOT_GAIN_MAX   1.0
+RKT_TILT_P     2.5
+RKT_TILT_D     0.5
+RKT_TILT_I     2.0
+# spin damper: fixed mode runs the mixer at scale 1.0 vs ~0.135 at high q under the schedule,
+# so the effective spin gain is ~7x higher -- drop 0.05 -> 0.006 to match the well-behaved level.
+RKT_SPIN_DAMP  0.006

@@ -12,7 +12,9 @@
 #   Tools/ArduRocket/sitl_tests/sitl.sh                 # vertical rail  (rocket-tilt0)
 #   Tools/ArduRocket/sitl_tests/sitl.sh tilt20          # 20 deg rail
 #   Tools/ArduRocket/sitl_tests/sitl.sh rocket-tilt20-unstable
-#   Tools/ArduRocket/sitl_tests/sitl.sh tilt20 --wind-direction 90   # extra sim args pass through
+#   Tools/ArduRocket/sitl_tests/sitl.sh tilt20 --speedup 10   # extra SITL args pass through
+# (Wind is NOT a SITL launch arg -- rocket_test.py sets it at runtime via SIM_WIND_*; use
+#  `rocket_test.py wind --mph N`.)
 set -euo pipefail
 
 root="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"

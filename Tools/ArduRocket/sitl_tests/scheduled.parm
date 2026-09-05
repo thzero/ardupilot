@@ -1,0 +1,11 @@
+# FALLBACK: re-activate the MOT_Q_REF dynamic-pressure gain schedule.
+# Fixed gain (RKT_QSCHED=0) is the default and what the derived gains target. This file restores
+# the older q-scheduled tune -- kept for one hardware flight's worth of confidence before the
+# schedule is deleted. Load with: rocket_test.py <scenario> --gains scheduled.parm
+RKT_QSCHED     1
+MOT_GAIN_MAX   4.0
+MOT_Q_REF      12000
+RKT_TILT_P     4.0
+RKT_TILT_D     0.3
+RKT_TILT_I     2.0
+RKT_SPIN_DAMP  0.042

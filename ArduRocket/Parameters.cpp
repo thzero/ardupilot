@@ -147,17 +147,17 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
 
     // @Param: RKT_TILT_P
     // @DisplayName: Tilt controller proportional gain
-    // @Description: Direct tilt-law P gain (BOOST/COAST): fin = -TILT_P*view_angle - TILT_D*view_rate - TILT_I*integral, q-scaled by the mixer. 4.0 puts full fin near 14 deg of lean. This is the ascent tune; the ATC_* gains do not drive the ascent.
+    // @Description: Direct tilt-law P gain (BOOST/COAST): fin = -TILT_P*view_angle - TILT_D*view_rate - TILT_I*integral, scaled by the mixer. Default 2.5 is the validated fixed-gain (RKT_QSCHED=0) tune; full fin near 23 deg lean. This is the ascent tune; the ATC_* gains do not drive the ascent. On an imported airframe ork_to_rocket.py derives this from inertia + fin geometry.
     // @Range: 0 20
     // @User: Standard
-    AP_GROUPINFO("RKT_TILT_P", 6, ParametersG2, tilt_p, 4.0f),
+    AP_GROUPINFO("RKT_TILT_P", 6, ParametersG2, tilt_p, 2.5f),
 
     // @Param: RKT_TILT_D
     // @DisplayName: Tilt controller rate gain
     // @Description: Direct tilt-law D gain (BOOST/COAST), on the view-frame body rate. Damps the correction swing to stop overshoot.
     // @Range: 0 2
     // @User: Standard
-    AP_GROUPINFO("RKT_TILT_D", 7, ParametersG2, tilt_d, 0.3f),
+    AP_GROUPINFO("RKT_TILT_D", 7, ParametersG2, tilt_d, 0.5f),
 
     // @Param: RKT_TILT_I
     // @DisplayName: Tilt controller integral gain
@@ -175,10 +175,17 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
 
     // @Param: RKT_SPIN_DAMP
     // @DisplayName: Spin-rate damper gain
-    // @Description: Direct spin damper (BOOST/COAST): yaw fin = -SPIN_DAMP*gyro.x, q-scaled. The effective damping moment is ~SPIN_DAMP*MOT_Q_REF, so change this together with MOT_Q_REF (rescale by the inverse ratio) or the spin will chatter or run away. 0.042 is matched to MOT_Q_REF 12000.
+    // @Description: Direct spin damper (BOOST/COAST): yaw fin = -SPIN_DAMP*gyro.x, scaled by the mixer. Default 0.006 is the validated fixed-gain (RKT_QSCHED=0) value. NOTE the effective damping moment scales with the mixer gain, so under the RKT_QSCHED=1 schedule this must be ~0.042 (see scheduled.parm). On an imported airframe ork_to_rocket.py derives it from spin inertia + fin geometry.
     // @Range: 0 0.5
     // @User: Standard
-    AP_GROUPINFO("RKT_SPIN_DAMP", 10, ParametersG2, spin_damp, 0.042f),
+    AP_GROUPINFO("RKT_SPIN_DAMP", 10, ParametersG2, spin_damp, 0.006f),
+
+    // @Param: RKT_QSCHED
+    // @DisplayName: Fin gain schedule enable
+    // @Description: 0 (default) = MatrixPilot-style fixed gain (mixer runs at constant MOT_GAIN_MAX scale; aero moment scales with real q on its own) -- validated across the flight envelope, and the mode the derived gains target. 1 = scale fin deflection by MOT_Q_REF/q (dynamic-pressure schedule); a fallback kept for one hardware flight's confidence -- needs the scheduled gain set (see Tools/ArduRocket/sitl_tests/scheduled.parm). Real q gates apogee/RKT_MIN_Q either way.
+    // @Values: 0:FixedGain,1:QSchedule
+    // @User: Standard
+    AP_GROUPINFO("RKT_QSCHED", 11, ParametersG2, qsched, 0),
 
     // @Group: RKT_
     // @Path: ../libraries/AP_Rocket/AP_Rocket.cpp
@@ -243,7 +250,12 @@ static const struct AP_Param::defaults_table_struct rocket_defaults[] = {
   allocate_motors() has created them.
  */
 static const struct AP_Param::defaults_table_struct rocket_late_defaults[] = {
-    // the fin q-schedule: the key ascent-authority knob; pairs with RKT_SPIN_DAMP (move together)
+    // Fixed gain (RKT_QSCHED=0, the default) runs the mixer at this constant scale -- 1.0 = the
+    // controller's fin command maps 1:1 to deflection. Under the RKT_QSCHED=1 fallback schedule
+    // this is instead the low-q boost cap and wants ~4 (see scheduled.parm).
+    { "MOT_GAIN_MAX", 1.0 },
+    // Only used by the RKT_QSCHED=1 fallback schedule (fin deflection = command * MOT_Q_REF/q).
+    // Ignored under fixed gain. Kept so the schedule remains reachable for one hardware flight.
     { "MOT_Q_REF", 12000 },
     // ATC cascade gains: used ONLY on the rail (ARMED); in BOOST/COAST the direct tilt/spin law
     // (RKT_TILT_*, RKT_SPIN_DAMP) overrides the cascade, so these do NOT drive the ascent. Baked

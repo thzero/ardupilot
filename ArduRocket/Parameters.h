@@ -153,6 +153,16 @@ public:
      */
     AP_Float spin_damp;
 
+    /*
+      Fin gain schedule enable. 1 (default) = the mixer scales fin deflection by MOT_Q_REF/q
+      (baro-derived q) to hold the control MOMENT roughly constant across the huge boost speed
+      range. 0 = MatrixPilot-style FIXED gain: the mixer runs at a constant scale (MOT_GAIN_MAX)
+      and the aerodynamic moment scales with real q on its own. The real q still gates apogee and
+      RKT_MIN_Q. An EXPERIMENT toggle to test whether the schedule earns its airframe-physics
+      dependency.
+     */
+    AP_Int8 qsched;
+
     // Flight stage detection: launch gating and burnout shutdown.
     AP_Rocket rocket;
 

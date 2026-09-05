@@ -361,7 +361,10 @@ void ArduRocket::run_rocket_control()
     rkt.update(ins.get_accel(), climb_rate_ms);
 
     update_dynamic_pressure();
-    motors->set_dynamic_pressure(dynamic_pressure_pa);
+    // The mixer gets real q for the schedule, or 0 for MatrixPilot-style fixed gain (the mixer
+    // reads q<=0 as "no airflow" and uses a constant MOT_GAIN_MAX scale). dynamic_pressure_pa
+    // itself stays the real value -- apogee detection and the RKT_MIN_Q gate below use it.
+    motors->set_dynamic_pressure(g2.qsched ? dynamic_pressure_pa : 0.0f);
 
     // Map the detector's stage onto the vehicle's, which additionally knows about
     // being disarmed (PREP covers both the table and the rail).
@@ -623,24 +626,33 @@ void ArduRocket::run_rocket_control()
          */
         const Vector3f vg = ahrs_view->get_gyro();              // view-frame rates, rad/s
 
+        // P+D command per axis, BEFORE the integral. Used both for the fin output and for
+        // conditional anti-windup below.
+        const float pd_roll  = -g2.tilt_p * ahrs_view->roll  - g2.tilt_d * vg.x;
+        const float pd_pitch = -g2.tilt_p * ahrs_view->pitch - g2.tilt_d * vg.y;
+
         // Integrate the residual lean and cancel the steady weathercock bias that PD alone
-        // leaves. dt = the fast-loop period (this runs as a FAST_TASK). The integral is clamped
-        // so its fin contribution stays within +/-RKT_TILT_IMAX (anti-windup); it is zeroed on
-        // the rail (the else below) so it always starts fresh at launch.
+        // leaves. dt = the fast-loop period (this runs as a FAST_TASK). Two anti-windup guards:
+        // (1) the integral is clamped so its fin share stays within +/-RKT_TILT_IMAX; (2) an axis
+        // does NOT integrate while its P+D command alone already saturates the fin (|pd| >= 1) --
+        // otherwise the integral keeps winding against a pinned fin and overshoots when the
+        // disturbance clears. Zeroed on the rail (the else below) so it starts fresh at launch.
         const float ki = g2.tilt_i;
         const float dt = scheduler.get_loop_period_s();
         if (ki > 0.0f) {
             const float i_clamp = g2.tilt_imax / ki;            // bound on the integral itself
-            tilt_i_roll  = constrain_float(tilt_i_roll  + ahrs_view->roll  * dt, -i_clamp, i_clamp);
-            tilt_i_pitch = constrain_float(tilt_i_pitch + ahrs_view->pitch * dt, -i_clamp, i_clamp);
+            if (fabsf(pd_roll) < 1.0f) {
+                tilt_i_roll  = constrain_float(tilt_i_roll  + ahrs_view->roll  * dt, -i_clamp, i_clamp);
+            }
+            if (fabsf(pd_pitch) < 1.0f) {
+                tilt_i_pitch = constrain_float(tilt_i_pitch + ahrs_view->pitch * dt, -i_clamp, i_clamp);
+            }
         } else {
             tilt_i_roll = tilt_i_pitch = 0.0f;   // integral disabled
         }
 
-        motors->set_roll (constrain_float(-g2.tilt_p * ahrs_view->roll  - g2.tilt_d * vg.x
-                                          - ki * tilt_i_roll,  -1.0f, 1.0f));
-        motors->set_pitch(constrain_float(-g2.tilt_p * ahrs_view->pitch - g2.tilt_d * vg.y
-                                          - ki * tilt_i_pitch, -1.0f, 1.0f));
+        motors->set_roll (constrain_float(pd_roll  - ki * tilt_i_roll,  -1.0f, 1.0f));
+        motors->set_pitch(constrain_float(pd_pitch - ki * tilt_i_pitch, -1.0f, 1.0f));
     } else {
         // Not steering (on the rail in ARMED, no airflow): hold the tilt integrator at zero so
         // it cannot wind up against a constraint it can't beat, and starts clean at launch.

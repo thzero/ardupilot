@@ -34,7 +34,6 @@ import time
 from pymavlink import mavutil
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GENTLE = os.path.join(HERE, "gentle_gains.parm")
 
 MPH = 0.44704   # mph -> m/s
 
@@ -486,7 +485,11 @@ def main():
         VERT_TARGET_DEG = 8.0
         set_param(m, "SIM_WIND_SPD", 0.0)
         force_arm(m)
-        r = run(m, 30)
+        # 36 s, not 30: the run clock includes the ~3 s on-rail ignition delay, and fixed gain
+        # flies more vertically -> higher -> apogee near 30-31 s of run time. At 30 s the run
+        # timed out just before the apogee STATUSTEXT, so ascent_end never latched and the steady
+        # metric came back "--". 36 s comfortably captures apogee + the short post-apogee tail.
+        r = run(m, 36)
         report("VERTICAL (20 deg rail)", r)
         if args.spin:
             print_spin_transient(r["truerates"], ascent_rel=r.get("ascent_rel"))
