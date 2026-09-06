@@ -178,7 +178,7 @@ def derive_fin(ork, tab_chord=0.25, tab_span=0.75, tab_max_deg=20.0,
 # tune (RKT_TILT_P 2.5, RKT_TILT_D 0.5, RKT_TILT_I 2.0, RKT_SPIN_DAMP 0.006). Anchoring to a real
 # flight absorbs the fin-model's ~10-20% absolute error; the physics contributes the size-scaling
 # so a bigger rocket gets bigger gains automatically. To retune the whole fleet's feel, scale all
-# four C together. Full rationale: ArduRocket/ARDUROCKET_GAIN_PROPOSAL.md.
+# four C together. Full rationale: ArduRocket/ARDUROCKET_PLAN.md section 9d.
 GAIN_C_P = 1.882456e-03
 GAIN_C_D = 3.764911e-04
 GAIN_C_I = 1.505964e-03
@@ -247,8 +247,11 @@ SIM_RKT_MARGIN   2.0
 # --- control gains: DERIVED from inertia + fin geometry + fin arm -----------
 # Fixed-gain ascent tune (RKT_QSCHED=0, the default), computed as
 #     gain = C * J / (force_gain * fin_arm)
-# with the C constants calibrated once from the flight-validated anchor airframe. A bigger,
-# heavier rocket gets bigger gains automatically -- you do NOT hand-tune these per airframe.
+# with the C constants calibrated once from the flight-validated anchor airframe. A bigger, heavier
+# rocket gets proportionally bigger gains -- so this is a physically size-scaled STARTING point, not
+# a hand-tune from scratch. It is NOT zero-tuning: fin_arm must be right (below), and a genuinely
+# different airframe (very different thrust-to-weight, static margin, or size) still needs a SITL
+# verification flight before you trust these.
 # {arm_provenance}
 # Re-run this script if you change the fin geometry or the fin arm; these follow.
 # (force_gain {force_gain:.5f}, J_tilt {j_tilt:.3f}, J_spin {j_spin:.4f}, fin_arm {fin_arm:.4f})

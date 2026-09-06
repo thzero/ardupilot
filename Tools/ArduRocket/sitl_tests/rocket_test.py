@@ -384,7 +384,8 @@ def report(name, r, extra=""):
         print(f"   {s}")
     print("   (metrics below are ASCENT ONLY: rail -> apogee/give-up)")
     if r["max_tilt"] is not None:
-        print(f"   max tilt   est {r['max_tilt']:6.1f}   true {fmt(r['true_max'])} deg")
+        print(f"   peak tilt  est {r['max_tilt']:6.1f}   true {fmt(r['true_max'])} deg"
+              f"   (FULL ascent -- includes the unavoidable apogee nose-over; NOT a flight-quality number)")
         print(f"   at apogee  est {r['final_tilt']:6.1f}   true {fmt(r['true_final'])} deg")
     print(f"   fins hit the stops: {'YES' if r['servo_sat'] else 'no'}")
     if r.get("spin_mean") is not None:
@@ -532,6 +533,11 @@ def main():
         launch_lean = max((tru for (tr, _e, tru, _f) in traj
                            if tru is not None and a and tr <= 0.15 * a), default=0.0)
         fins_ok = (r["fin_hi"] > 0.25) or (launch_lean < 0.5)
+        # The honest flight-quality peak: max TRUE tilt while the fins still have authority (first
+        # 75% of ascent -- q meaningful). The apogee nose-over (climb -> 0, q -> 0, rocket tips over
+        # at the top of its arc) is EXCLUDED; it is unavoidable physics, not a control/airframe fault.
+        print(f"   powered-flight max TRUE tilt (first 75% of ascent, apogee nose-over excluded): "
+              f"{powered_max:.1f} deg")
         print(f"   steady TRUE tilt (MISSION: drive to < {VERT_TARGET_DEG:.0f}): {fmt(steady_tilt)} deg")
         print(f"   tumbled / gave up: {'YES' if tumbled else 'no'}")
         if launch_lean < 0.5:

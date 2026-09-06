@@ -1,5 +1,8 @@
 # ArduRocket SITL test harness
 
+> Tooling notes, not spec. The authoritative docs are `ArduRocket/ARDUROCKET_*.md` (README = operate,
+> PLAN = design record, STATUS = current state + what's next); this defers to them.
+
 Repeatable, scripted SITL runs for tuning the attitude gains (ARDUROCKET_PLAN.md **B.2.1**)
 and for exercising the tilt give-up backstop (**B.3**).
 
@@ -49,34 +52,44 @@ Add `--url tcp:<WSL-IP>:5760` if you run the script from Windows instead of insi
 | `flight` | `rocket` | Stage 3 — nominal full flight; tilt small through boost, degrades near apogee |
 | `sweep` | `rocket` | Stage 4 — prints the per-wind commands for the 0→20 mph envelope |
 | `giveup` | `rocket-tilt20-unstable` | Backstop — an unstable airframe genuinely tumbles past `RKT_GIVEUP_DEG=45`; the hardened backstop needs a real *rotating* departure (gyro-corroborated), not a steady lean; PASS/FAIL |
-| `gains` | `rocket-tilt20` | Loads `gentle_gains.parm` and checks the airframe is driven to and held **VERTICAL** (median true tilt < 8°) through the powered flight — the mission. Currently FAILS (holds ~20°); fins have authority, not pinned; PASS/FAIL |
+| `gains` | `rocket-tilt20` | Checks the airframe is driven to and held **VERTICAL** (median true tilt < 2°) through the powered flight — the mission. **PASSES** on the baked config (steady ~0.4°). Pass `--gains <file>` only to experiment with `RKT_*`/`MOT_*` knobs (`ATC_*` gains are inert for ascent); `--wind N` adds a crosswind. PASS/FAIL |
 
-## Starting gains (`gentle_gains.parm`)
+## The `gains` mission grade — fly VERTICAL
 
-`gentle_gains.parm` next to this script holds the Appendix B.2 gentle starting set
-(`ATC_ANG_*_P 3.0`, `ATC_RAT_*_P 0.05`, `D 0.002`, `I 0`). Load it into any scenario with
-`--gains`, so `step`/`wind` start from those values without hand-typing:
-```bash
-python3 rocket_test.py step --gains Tools/ArduRocket/sitl_tests/gentle_gains.parm
-```
-The `gains` scenario loads it automatically (no `--gains` needed) and reports **PASS/FAIL**
-against **the mission — fly VERTICAL.** It passes only if the airframe is actually driven to
-and held near 0° off vertical (median TRUE tilt < 8° over the steady window, skipping the
-launch transient and the apogee tail), doesn't tumble, and the fins have authority without
-being pinned. **It currently FAILS:** the airframe holds ~20° because the steering-induced
-attitude-estimate error fools the controller into thinking it is already near vertical and
-easing the fins off. Making the *true* attitude (not just the estimate) reach vertical is the
-open work — see PLAN §3c. Do **not** relax this bar to make it pass; holding the launch lean
-is a FAIL.
+The `gains` scenario reports **PASS/FAIL** against **the mission — fly VERTICAL.** It passes only
+if the airframe is actually driven to and held near 0° off vertical (median TRUE tilt < 2° over the
+steady window — 20–60% of ascent, skipping the launch transient and the apogee tail), doesn't tumble
+during powered flight, and the fins have authority without being pinned. On the baked config it
+**PASSES** — a 20° rail drives to steady ~0.4° and holds ~0.2–2° through the whole powered/coast
+ascent. The `RKT_TILT_I` integral term in the direct tilt law is what drives the steady lean to zero.
 
-## Tuning loop (Proposal 1)
+The grade also prints two peak numbers — read them correctly:
+- **`powered-flight max TRUE tilt`** (first 75% of ascent, apogee excluded) — the real flight-quality
+  peak while the fins have authority. It is ~= the launch lean; the rocket never overshoots it.
+- **`peak tilt (FULL ascent)`** — includes the unavoidable **apogee nose-over** (climb→0, q→0, the
+  rocket tips over at the top of its arc). This is NOT a flight-quality number and NOT a fault; every
+  rocket does it. Do not read it as a rail-exit or wind excursion.
 
-1. `gains` on `rocket-tilt20` — loads `gentle_gains.parm` and checks the gentle baseline (PASS/FAIL).
-2. `step` on `rocket-tilt20` — confirm fins reach ~half at 20°, not saturated (gentle = full at ~40°).
+`ATC_*` gains are **inert for ascent** (the direct tilt/spin law in `rocket_control.cpp` overrides the
+cascade during BOOST/COAST), so the real ascent knobs are `RKT_TILT_P/D/I`, `RKT_SPIN_DAMP`, and
+`MOT_Q_REF`/`MOT_GAIN_MAX`. Pass `--gains <file>` only to experiment with those. To fly the PASSIVE
+airframe with the tabs frozen (no control, for airframe-vs-controller diagnosis), load `baseline.parm`.
+Do **not** relax the 2° bar to make a tune pass; holding the launch lean is a FAIL.
+
+## Tuning loop
+
+Gains are derived from the OpenRocket model (`ork_to_rocket.py`) and baked as the firmware default,
+so per-rocket hand-tuning should not be needed. When you do want to experiment, tune the **ascent**
+knobs — `RKT_TILT_P/D/I`, `RKT_SPIN_DAMP`, `MOT_Q_REF`/`MOT_GAIN_MAX` — NOT `ATC_*` (the direct law
+overrides the cascade in BOOST/COAST, so `ATC_*` is inert for ascent).
+
+1. `gains` on `rocket-tilt20` (optionally `--gains <file>`, `--wind 20`) — the mission grade; want
+   PASS with steady TRUE tilt < 2°.
+2. Adjust `RKT_TILT_P/D/I` for the transient/steady balance; keep `RKT_SPIN_DAMP` scaled with
+   `MOT_Q_REF` (spin moment gain ~ `RKT_SPIN_DAMP·MOT_Q_REF` — move them together).
 3. `wind --mph 20` and `flight` on `rocket` — confirm it holds while fast, no oscillation.
-4. Raise `ATC_ANG_*_P` until `step` first shows overshoot, back off ~30%.
-5. **Cross-check** the final gains in MATLAB-in-the-loop (stages 0/1/3 — the MATLAB plant has
-   no wind, so skip 2/4 there). Same behaviour on both plants ⇒ not overfit.
+4. **Cross-check** the final gains in MATLAB-in-the-loop (stages 0/1/3 — the MATLAB plant has
+   no wind, so skip wind cases there). Same behaviour on both plants ⇒ not overfit.
 
 ## Notes
 

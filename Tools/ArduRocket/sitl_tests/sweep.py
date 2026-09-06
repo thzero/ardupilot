@@ -9,7 +9,7 @@ runs the `gains` test, and tabulates PASS/FAIL + the steady TRUE tilt it settled
       clock 0  -> lean falls straight onto ONE fin pair (head-on; the only case tested before)
       clock 45 -> lean falls on the DIAGONAL, between two pairs (both axes correcting at once)
   Sweeping clock 0..90 covers all 360 deg by 4-fold fin symmetry. Sweeping tilt covers the
-  0-5 deg launch-rail-angle range. If every cell drives true tilt to vertical (< 8 deg) and
+  0-5 deg launch-rail-angle range. If every cell drives true tilt to vertical (< 2 deg) and
   holds it, the vehicle is PROVEN orientation- and angle-independent (to the sweep resolution).
 
 Runs one SITL at a time on port 5760, with --defaults so the no-GPS DCM config is applied to
@@ -117,7 +117,7 @@ def main():
 
     print("ArduRocket ORIENTATION SWEEP  (tilt deg  x  clock deg)")
     print("clock = lean direction vs fins: 0 = onto a fin pair, 45 = diagonal between pairs")
-    print("cell  = P/F  +  steady TRUE tilt (deg); want 'P' with tilt < 8\n")
+    print("cell  = P/F  +  steady TRUE tilt (deg); want 'P' with tilt < 2\n")
 
     head = "  tilt\\clk |" + "".join("%9g" % c for c in clocks)
     print(head)

@@ -1,9 +1,13 @@
-# ArduRocket — a standalone vehicle folder
+# ArduRocket — design record
 
-> ## STATUS: IMPLEMENTED AND FLYING IN SITL (2026-07-18)
+This is the **design record** for ArduRocket: what was built, why it is built this way, and the
+bring-up lessons. It is **not** a forward plan — current state and pending work live in
+[ARDUROCKET_STATUS.md](ARDUROCKET_STATUS.md); build/run/operate is in
+[ARDUROCKET_README.md](ARDUROCKET_README.md).
+
+> ## Implemented and flying in SITL (since 2026-07-18)
 >
-> The design below was implemented on the `ardurocket` branch and **passes a full
-> simulated flight**:
+> Implemented on the `ardurocket` branch; **passes a full simulated flight**:
 >
 > ```
 > PREP -> FINCHECK -> ARMED -> BOOST -> COAST -> DESCENT -> LANDED -> (manual disarm) -> PREP
@@ -18,17 +22,14 @@
 > with QROCKET removed.
 >
 > **NOT verified — required before any real motor:**
-> - **`ATC_*` gains are the day-one placeholders, never tuned.** `MOT_Q_REF` has been
->   tuned (600, by measurement — see §9), but the attitude gains have not. NOTE the
->   plant they must be tuned against was corrected substantially (inertia, damping,
->   drag, fin authority — §9); any gain work predating that is void. For a principled
->   starting point (start gentle — full fin at ~40° tilt) and a tilt-based give-up
->   backstop, see **Appendix B**, drawn from a flown fin-steered rocket.
-> - **Wind-limited, not gain-limited, near apogee.** At the 20 mph operational ceiling
->   the airframe reaches ~15 deg off vertical late in coast because the tabs cannot
->   out-muscle the wind at low q, not because the controller is failing. In calm air
->   it holds within ~0.3 deg. This is a static-margin/tab-authority limit, not a
->   tuning one; see §9's MOT_Q_REF sweep.
+> - **Never flown on hardware.** Everything here is SITL. The ascent gains are now derived from
+>   the airframe model and fixed-gain is the default (§9d); `ATC_*` are inert for ascent, and a
+>   tilt-based give-up backstop is implemented (Appendix B.3). What remains before a motor — a real
+>   `fin_arm` and one hardware flight — is tracked in STATUS.
+> - **Noses over near apogee — expected, not a failure.** The airframe flies vertical through the
+>   powered/coast ascent (steady ~0.2–0.5°); as it slows to apogee the dynamic pressure collapses
+>   and it tips over at the top of its arc, which no fin control can prevent. Grade the powered-flight
+>   window, not the full-ascent peak (§10). This is physics, not a tuning or tab-authority limit.
 > - **Control tab dimensions are ASSUMED.** The tab is defined in **mm** on the trailing
 >   edge — width (flap depth), height (spanwise length), root offset, hinge inset
 >   (`SIM_RKT_TAB_W/H/RT/AX`, `TAB_MAX` deg; MATLAB `P.tab`). Not in either OpenRocket
@@ -1044,6 +1045,12 @@ detection.
 
 ### Gain scheduling reference — MOT_Q_REF = 600, by measurement
 
+> **SUPERSEDED (2026-09-05):** the dynamic-pressure schedule is no longer the default — fixed gain
+> (`RKT_QSCHED=0`, MatrixPilot-style) flies the envelope and the gains are now derived from the
+> airframe model (§9d). `MOT_Q_REF`/`MOT_GAIN_MAX` remain in-tree behind `RKT_QSCHED=1` as a fallback
+> and are slated for deletion after one hardware flight. The measurement below is kept as the record
+> of how the schedule was characterized while it was live.
+
 `MOT_Q_REF` sets the maximum control moment the mixer will command, because the fin
 output clips at +/-1. It was swept against an 8 m/s crosswind:
 
@@ -1106,6 +1113,168 @@ know — control-tab dimensions, fin arm and static margin are left at defaults 
 flagged **SET BY HAND** (re-run after editing so the derived force/stability update).
 This script exists because hand transcription is exactly where the errors above came
 from; it makes the extraction deterministic and repeatable.
+
+## 9d. Physics-derived control gains
+
+The attitude-control gains are **computed from the OpenRocket model** (inertia + fin geometry),
+anchored to one flight-validated airframe — so a new rocket starts from physically size-scaled gains
+rather than a guess or a hand-tune from scratch. A bigger, heavier rocket gets proportionally bigger
+gains, because they scale with the airframe's inertia and fin moment. This is **not** zero-tuning:
+you must supply the real `fin_arm` (below), and a genuinely different airframe (very different
+thrust-to-weight, static margin, or size) still needs a SITL verification flight before you trust it.
+What it removes is per-airframe hand-tuning from scratch; what it does not remove is verification.
+The derivation lives in `ork_to_rocket.py` (`derive_gains()`), the constants are baked as firmware
+defaults in `Parameters.cpp`, and the direct ascent law that consumes them is in `rocket_control.cpp`
+(§3, and the fin mixer §5). (Implemented 2026-09-05, consolidated here from a standalone proposal doc.)
+
+### The problem: gains are irreducibly airframe-specific
+
+The ascent law (BOOST/COAST) commands fins directly from the estimate:
+
+```
+fin_roll = -RKT_TILT_P * view_roll - RKT_TILT_D * view_roll_rate - RKT_TILT_I * integral
+fin_yaw  = -RKT_SPIN_DAMP * spin_rate
+```
+
+The right `RKT_TILT_P/D` and `RKT_SPIN_DAMP` depend on the airframe: a heavier rocket has more
+rotational inertia, so the same gain produces less angular acceleration and under-corrects; a rocket
+with bigger or longer-armed fins makes more moment and needs less gain. There is no single value
+correct for a 3-inch minimum-diameter bird and a 6-inch fiberglass beast. **This is control theory,
+not a bug** — you cannot steer a plant without the law encoding something about its inertia and
+control effectiveness. The only way to stop hand-tuning per rocket is to *derive* the gains from the
+airframe model, which ArduRocket can do (it has the OpenRocket import) and MatrixPilot could not.
+
+### MatrixPilot does not escape this — and we go one better
+
+ArduRocket borrows two techniques from the flown MatrixPilot fin-steered rocket: the DCM
+accelerometer-gate under thrust (`rmat.c`: accel correction only while `launched == 0`) and direct
+"P on the gravity vector" control. It is tempting to think MatrixPilot avoided per-airframe tuning.
+It did not: its stabilization gains (`PITCHGAIN` ~0.125–0.25, `PITCHKD` ~0.25, `YAWKP`/`YAWKD`) live
+in `options.h` and are set **per aircraft** — the same category as `RKT_TILT_P/D`. What MatrixPilot
+does **not** do is gain-schedule on airspeed (no dynamic pressure, no `MOT_Q_REF`) — *that* is the
+part worth copying, confirmed below. MatrixPilot users hand-tuned because they had no airframe model
+to compute from; ArduRocket has one, so it derives the gains instead of matching a lookup.
+(Sources: MatrixPilot `HowToConfigure` / `HowToConfigureMP30` wikis; Rocketry Forum "Simulating Fin
+Control".)
+
+### Where "airspeed" came from, and why fixed gain is a clean simplification
+
+The retired schedule needed a dynamic pressure `q`, and the vehicle has no pitot and no GPS — so `q`
+came from the **barometer**: `speed = |ahrs.get_velocity_D(true)|` (with DCM + no GPS this is the
+baro-filtered climb rate), `q = 0.5 * air_density * speed^2`. Because the rocket flies near-vertical,
+its vertical speed ≈ its airspeed, so the barometer doubles as an airspeed sensor. That assumption is
+load-bearing but safe: it holds while near-vertical (the mission), and near apogee where vertical
+speed → 0 the `RKT_MIN_Q` gate has already stopped the fins, so the degraded estimate there is
+harmless. The estimate was always good enough for scheduling (a lagged, noisy filtered derivative) —
+which raised the question the fixed-gain experiment answered: is the schedule needed at all?
+
+### Fixed gain (MatrixPilot-style, no schedule) flies the whole envelope
+
+The fin mixer scales deflection by `min(MOT_Q_REF/q, MOT_GAIN_MAX)` and reads `q <= 0` as "no airflow
+→ use constant `MOT_GAIN_MAX`." Param `RKT_QSCHED` (now **default 0**) feeds the mixer `q=0` to get
+constant-gain (MatrixPilot-style); `RKT_QSCHED=1` restores the schedule. The **real** `q` still gates
+apogee detection and `RKT_MIN_Q`. Verified fixed-gain flights (`rocket-tilt20` / `rocket`):
+
+| case | steady true tilt | peak spin | fin chatter | verdict |
+|------|------------------|-----------|-------------|---------|
+| 20° rail, no wind | 0.5° | 0°/s | 0 Hz | PASS |
+| vertical rail, no wind | 0.2° | 0°/s | 0 Hz | PASS |
+| vertical rail, 20 mph gusting crosswind | 0.1° | 1°/s | ~0.9 Hz (slow correction, not buzz) | PASS |
+
+Fixed gain flies to vertical as well as or better than the schedule (0.1–0.5° steady across the
+envelope), with no oscillation. **The `MOT_Q_REF` schedule is not needed**, which removes its own
+airframe-geometry dependency and simplifies the mixer. One caught pitfall: the first attempt left
+`RKT_SPIN_DAMP` at 0.05, ~7× too hot for fixed mode (constant scale 1.0 vs ~0.135 at high q under the
+schedule) → spin ran to 1740°/s with fin chatter. `RKT_SPIN_DAMP` must scale as `1/MOT_GAIN_MAX`
+(fixed) or track `1/MOT_Q_REF` (scheduled); dropping it to 0.006 fixed it.
+
+### The derivation
+
+With the schedule gone, the fixed gains map directly to physical quantities. The tilt loop is second
+order: fin deflection is `-P*angle - D*rate`, and the plant is
+`angular_accel = (q * force_gain * fin_arm / J_tilt) * deflection`. Substituting:
+
+```
+theta'' + (K·D) theta' + (K·P) theta = 0,   with  K = q * force_gain * fin_arm / J_tilt
+```
+
+a standard second-order system with `omega_n^2 = K·P` and `2·zeta·omega_n = K·D`. Designing for a
+target natural frequency and damping, the gains that produce the SAME closed-loop response scale
+identically across airframes:
+
+```
+RKT_TILT_P     =  C_P * J_tilt / (force_gain * fin_arm)
+RKT_TILT_D     =  C_D * J_tilt / (force_gain * fin_arm)
+RKT_SPIN_DAMP  =  C_S * J_spin / (force_gain * fin_arm)
+```
+
+| term | meaning | source |
+|------|---------|--------|
+| `J_tilt`, `J_spin` | tilt / spin moments of inertia | **imported** (`SIM_RKT_JTILT0/1`, `SIM_RKT_JSPIN0/1`) |
+| `force_gain` | fin aero force per unit q at full deflection | **computed** (`derive_fin()`, `ork_to_rocket.py`: `S_fin·CLa·Kfb·tau·radians(tab_max_deg)`) |
+| `fin_arm` | axial distance from CG to the fins | CG (imported `.csv`) + fin location (imported `.ork`) |
+| `C_P`, `C_D`, `C_S` | portable responsiveness/damping constants | **set once**, identical for every airframe |
+
+The design still has an implicit reference `q` (the speed at which the response is nominal), but that
+is a single global choice, not a per-airframe number. Fixed gain accepts a loop that is softer off
+the rail and punchier at boost — fine for a naturally stable rocket that only needs modest
+corrections. `RKT_TILT_I` (the integrator that nulls the steady weathercock lean) is more forgiving:
+it scales with `C_P` in the current import, and could equally be a fixed time-constant.
+
+### Calibration — anchored to a validated flight, not guessed
+
+`C_P/C_D/C_S` are **back-calculated from the one airframe that is flight-validated**. We know its
+working fixed-gain values AND its physical numbers, so
+`C_P = RKT_TILT_P_validated * force_gain * fin_arm / J_tilt` (and likewise C_D, C_S). Any new rocket
+then gets `RKT_TILT_P = C_P * J_tilt_new / (force_gain_new * fin_arm_new)`. The constants shipped in
+`ork_to_rocket.py`:
+
+```
+C_P = 1.882456e-03    C_D = 3.764911e-04    C_I = 1.505964e-03    C_S = 1.077778e-03
+```
+
+`force_gain` uses `derive_fin`'s fractional-tab formula consistently in both calibration and emission,
+so the anchor round-trips (`2.5 / 0.5 / 2.0 / 0.006`) regardless of the fin model's absolute accuracy.
+**Why anchor to a flight** rather than a first-principles constant: the fin-effectiveness model (`CLa`
+from aspect ratio, body interference `Kfb`, tab factor `tau`) carries ~10–20% absolute uncertainty.
+Anchoring to a real validated flight absorbs that at the calibration point; what the physics
+contributes is the **scaling** (a 2×-inertia rocket gets ~2× gain), which is exact regardless of the
+model's absolute error. **Honest bound on the value:** the integrator nulls the steady lean regardless
+of the exact P/D, so the *steady* metric is forgiving of moderate gain mismatch — a 2×-inertia
+airframe flown with UN-scaled 1× gains still reached ~1° steady. So the derivation's worth is
+consistent transient response and staying inside the authority envelope for *larger* airframe changes,
+not "un-scaled gains crash." Don't oversell it.
+
+### The `fin_arm` input (and what it is NOT)
+
+`fin_arm` is the **CG-to-fin axial distance** — the lever from the CG to where the fin force acts:
+`fin_arm = (fin axial position from the .ork) - (CG from the .csv, per burn state)`. Explicitly **not**
+the whole-airframe center of pressure or the static margin (CP − CG): those are stability quantities
+(how hard the airframe weathercocks — a disturbance the integrator nulls without knowing its
+magnitude), not the control moment arm. CG is imported and is also physically measurable (the
+balance-on-a-string test). Current state: `ork_to_rocket.py` takes `--fin-arm`; without it a
+placeholder (`fin_semispan * 5`) is used and the emitted gains are flagged provisional. Wiring the
+real CG-to-fin distance so `--fin-arm` is not required is the one remaining task.
+
+### What shipped and was verified (2026-09-05)
+
+- **Fixed gain is the firmware default.** `RKT_QSCHED` default 1→0; fixed-gain defaults
+  `RKT_TILT_P 2.5 / D 0.5 / I 2.0 / RKT_SPIN_DAMP 0.006`, `MOT_GAIN_MAX 1.0` baked in
+  `rocket_late_defaults`. A pure `rocket_test.py gains` (no flags) PASSES at ~0.5° steady.
+  `sitl_tests/scheduled.parm` keeps the `RKT_QSCHED=1` tune for one hardware flight before the
+  schedule is deleted.
+- **Gains derived in `ork_to_rocket.py`** (`GAIN_C_*` + `derive_gains()`); round-trip verified — a
+  synthetic `.ork`/`.csv` matching the anchor regenerates `2.5 / 0.5 / 2.0 / 0.006` exactly.
+- **Scaling verified** — a 2×-inertia airframe emits gains that exactly double (`P 5.0, D 1.0, I 4.0,
+  SD 0.012`), and flew vertical (1.0° steady, PASS). The same 2× airframe with UN-scaled 1× gains also
+  passed (~0.9° steady) — the integrator forgives moderate mismatch, per the honest bound above.
+  (When comparing peak tilt across airframes, use the **powered-flight window** metric, not the
+  full-ascent peak — the latter includes the unavoidable apogee nose-over, §10.)
+- **Not needed / does not touch:** the `MOT_Q_REF` schedule geometry dependency (retired, see the
+  note in §9); the estimator (DCM + no-GPS + gyro-only gate), the stage detector, the mixer
+  saturation handling, and the integrator anti-windup are all separately validated.
+- **Remaining work** (wiring the real `fin_arm`, the first hardware flight, and deleting the
+  `MOT_Q_REF` schedule afterward) is tracked in STATUS, not here.
 
 ## 10. Verification
 
@@ -1173,150 +1342,6 @@ Genuinely novel: `SIM_Rocket` (largest), `AP_FinMixerRocket` q-scheduling + `lim
 
 ---
 
-# APPENDIX A — Scope: thrust-vector control (TVC) variant
-
-**Status: SCOPED, NOT BUILT.** The fins variant is what flies today. This is the plan
-for a gimballed-motor variant, to be built after the fin gains are tuned.
-
-## A.1 Why TVC is a different plant, not just different actuators
-
-Fin authority scales with **dynamic pressure** (½ρv²). Gimbal authority scales with
-**thrust** (`moment ≈ thrust × sin(deflection) × moment_arm`). That inverts the
-control window end to end:
-
-| | Fins (built) | TVC (scoped) |
-|---|---|---|
-| Authority source | dynamic pressure | **thrust** |
-| At liftoff, v≈0 | **near zero** — the rail holds attitude | **full authority immediately** |
-| At burnout | still strong (fast, coasting) | **falls to zero** |
-| Control window | rail → apogee | **the burn only** (0.8–8 s) |
-| Steering ends at | **apogee** | **burnout** |
-| Controllable axes | all three | **tilt only; spin is impossible** |
-
-The two are complementary — TVC has authority exactly where fins don't. A combined
-boost-TVC / coast-fins airframe is the natural end state, and is out of scope here.
-
-**Spin is uncontrollable with a 2-axis gimbal.** Thrust acts along the airframe's long
-axis, so deflecting it produces moments about body Y and Z (both *tilt* axes, i.e.
-view pitch and view roll) but never about body X. So `limit.yaw` is pinned true and the
-yaw target must be reset every loop so no error accumulates. See the axis-mapping table
-in the Context section.
-
-## A.2 New class: `AP_TVCMixerRocket` (`libraries/AP_Motors/`)
-
-A **separate** `AP_MotorsMulticopter` subclass, not a frame option on
-`AP_FinMixerRocket`. ArduPilot's convention is one class per frame class
-(`Single`/`Coax` are separate despite shared geometry), the differing parts are exactly
-the ones you would override anyway, and sharing one class would leave half the
-parameters meaningless for whichever frame was selected.
-
-| Member | Behaviour |
-|---|---|
-| `init()` | Two servos, `k_rocketGimbalPitch`/`k_rocketGimbalRoll`, `set_angle(±4500)`. `set_initialised_ok(frame_class == MOTOR_FRAME_ROCKET_TVC)`. |
-| `output_armed_stabilizing()` | **Decoupled** (unlike the fins' elevon-style mix): `gimbal_pitch = pitch_thrust`, `gimbal_roll = roll_thrust`. Scale by the thrust proxy (A.3). Clamp to the mechanical limit and set `limit.roll/pitch` on clip. **`limit.yaw = true` unconditionally.** |
-| `output_to_motors()` | Write the two channels; centre them in `SHUT_DOWN`/`GROUND_IDLE`. |
-| `var_info` | `MOT_ACC_REF` (axial accel, g, at which gains are tuned), `MOT_GAIN_MAX`, `MOT_GMB_LIM` (mechanical gimbal limit, degrees — typically 5–15°). |
-| `_get_frame_string()` | `"ROCKET_TVC"` |
-
-Carry over from the fins class: throttle is still a fiction (solid motor), so
-`_throttle_in` is ignored and `_throttle_out` forced to 0; and the header must open
-with the same "why this is an AP_Motors subclass" explanation.
-
-## A.3 Gain scheduling — the thrust proxy is already measured
-
-Thrust is not instrumented, but it does not need to be: the **body-axial accelerometer
-reading is specific force ≈ thrust/mass**, and `AP_Rocket::up_accel_g()` already
-computes it.
-
-```
-fins:  scale = MOT_Q_REF   / q               (q from baro-derived vertical speed)
-TVC:   scale = MOT_ACC_REF / up_accel_g      (already available, no new sensor)
-```
-
-Caveat: axial accel is thrust *minus drag*, so at high speed it slightly underestimates
-thrust and the scheduling runs a little hot. Acceptable; note it when tuning.
-
-## A.4 Shared base class — the one real refactor
-
-The vehicle must feed a different scheduling input per frame, and apply a different
-stop policy. Rather than branch on a frame enum in `rocket_control.cpp`, introduce:
-
-```cpp
-class AP_MotorsRocketBase : public AP_MotorsMulticopter {
-public:
-    // q in Pa for fins, axial accel in g for TVC; each mixer interprets it
-    // against its own reference parameter.
-    virtual void set_authority_measure(float measure) = 0;
-
-    // true when control authority dies with the motor (TVC/jet vane), so the
-    // vehicle must stop steering at BURNOUT rather than at apogee.
-    virtual bool authority_requires_thrust() const = 0;
-};
-```
-
-This keeps tuning parameters with the mixer, and puts the burnout-vs-apogee policy
-*with the frame that owns it* instead of in a vehicle-side conditional.
-`AP_FinMixerRocket` returns `false`; `AP_TVCMixerRocket` returns `true`.
-
-`ArduRocket::motors` becomes an `AP_MotorsRocketBase*`.
-
-## A.5 Registration checklist (additions)
-
-1. `AP_Motors_Class.h` — `MOTOR_FRAME_ROCKET_TVC = 19` (fins keep 18).
-2. `SRV_Channel.h` — `k_rocketGimbalPitch = 194`, `k_rocketGimbalRoll = 195`, before the
-   `k_nr_aux_servo_functions` sentinel; plus a `@Values{Rocket}` line in `SRV_Channel.cpp`.
-3. **`FRAME_CLASS` parameter — ALREADY ADDED.** `0=Fins` (default, implemented),
-   `1=ThrustVectoring`, `@RebootRequired: True`, GCS-settable. It already drives the
-   switch in `ArduRocket::allocate_motors()`, which currently raises
-   `config_error("FRAME_CLASS=1 (TVC) not implemented")` for TVC — the vehicle refuses
-   to boot rather than silently falling back to fins and flying the wrong actuator.
-   Implementing TVC means replacing that `config_error` with the real allocation, and
-   passing `MOTOR_FRAME_ROCKET_TVC` to `motors->init()`.
-4. `Tools/autotest/default_params/rocket-tvc.parm`, and a `rocket-tvc` frame in
-   `vehicleinfo.json`. Remember `./waf configure` after adding it.
-
-## A.6 `rocket_control.cpp` change
-
-One policy line, driven by the mixer rather than a frame check:
-
-```cpp
-const bool steer = motors->authority_requires_thrust()
-                     ? (rkt.stage() == AP_Rocket::Stage::BOOST)      // TVC: dies at burnout
-                     : rkt.steering_active();                        // fins: BOOST or COAST
-```
-
-Plus feeding the right measure: `motors->set_authority_measure(q_pa)` for fins,
-`up_accel_g()` for TVC.
-
-`AP_Rocket` itself needs **no change** — it already reports the stages, and the actuator
-policy belongs to the vehicle/mixer.
-
-## A.7 `SIM_Rocket` change
-
-Add a gimbal model behind the `rocket-tvc` frame string: moment about body Y/Z equal to
-`thrust × sin(deflection) × moment_arm`, clamped to the mechanical limit, and **zero
-moment about body X** (no spin authority). Existing fin path untouched. ~40 lines.
-
-## A.8 Risks specific to TVC
-
-- **Short moment arm.** Gimbal-to-CG distance is small on a hobby airframe, so real
-  authority is lower than the maths suggests. Measure it, do not assume.
-- **Mechanical limit is hard.** ±5–15° typical. The mixer must clamp and report
-  saturation honestly, or the rate PIDs wind up against a stop.
-- **Servo slew rate matters far more than with fins**, because the entire control window
-  is one short burn.
-- **Zero authority after burnout** — the vehicle is ballistic and uncontrolled from that
-  moment. There is no fallback unless fins are also fitted.
-- **No spin control at all**, so a spinning airframe will gyroscopically cross-couple the
-  tilt axes. Log spin rate; do not attempt to control it with the gimbal.
-
-## A.9 Effort
-
-Mostly mechanical: ~200 lines for the new mixer, ~40 for the SIM gimbal, a handful of
-registration edits, and the `AP_MotorsRocketBase` refactor (which also tidies the fins
-class). The genuinely new work is tuning against a plant whose authority collapses to
-zero mid-flight.
-
 # APPENDIX B — Lessons from a flown fin-steered rocket (MatrixPilot RollPitchYaw)
 
 A cross-check against a controller that has actually flown: the **MatrixPilot / UAV
@@ -1344,6 +1369,10 @@ essentially P/D with no flight integrator — are exactly what a repeatedly-flow
 does.
 
 ## B.2 Proposal 1 — start the tilt gain GENTLE (full fin at ≈ 40° tilt)
+
+> **SUPERSEDED by §9d (2026-09-05):** the tilt gain is now *derived* from the airframe model rather
+> than started gentle and hand-tuned down. Kept below as the MatrixPilot lesson that motivated it
+> (their gain de-tuning across flights is exactly the per-airframe hand-tuning §9d removes).
 
 Their `MAX_TILT_ANGLE` is the tilt at which the fins reach full deflection. The instructive
 part is the **evolution across real flights**: early boards used **7.5°** (aggressive — full
@@ -1463,16 +1492,7 @@ map the vehicle back to BOOST/COAST and undo the give-up. The stage-mapping guar
 `run_rocket_control()` therefore skips remapping once `stage` is DESCENT **or** LANDED — both
 are terminal until touchdown / a manual disarm.
 
-## B.4 Proposal 3 (optional, future) — margin-based authority allocation
-
-Their `roll_feedback()` is more sophisticated than our mixer in one respect: it computes the
-fin-throw **left over** after the tilt commands and hands the remainder to spin, per axis, with
-explicit cases for which axis has margin. `AP_FinMixerRocket` does a simpler version (`rp_scale`
-reserves a fixed `yaw_headroom`; tilt wins ties). Ours is adequate — tilt is what matters and it
-gets priority — but if we ever see spin authority starved when tilt saturates, their
-margin-sharing scheme is the reference to copy.
-
-## B.5 Their flown configuration, for reference (SN5/SN6)
+## B.4 Their flown configuration, for reference (SN5/SN6)
 
 `MAX_TILT_ANGLE 40°`, `MAX_TILT_PULSE_WIDTH 500 µs`, `MAX_SPIN_RATE 500 °/s`,
 `MAX_SPIN_PULSE_WIDTH 500 µs`, `GYRO_RANGE 1000 °/s`, 40 Hz loop, `DETECT_APOGEE` on,

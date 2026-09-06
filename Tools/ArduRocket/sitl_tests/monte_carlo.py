@@ -12,7 +12,8 @@ runtime (SIM_WIND_*), set per flight. One SITL at a time on port 5760.
   python3 monte_carlo.py --grid --leans 0,5,10,15,20 --winds 0,10,20   # structured grid instead
 
 Reports pass rate, the worst samples, and tilt percentiles; with --plot writes a lean-vs-tilt
-scatter (coloured by wind, with the 8 deg mission bar) to montecarlo.png.
+scatter (coloured by wind) to montecarlo.png -- one panel for the steady attitude-hold tilt (with
+the 2 deg mission bar) and one for the powered-flight max tilt (apogee nose-over excluded).
 """
 import argparse
 import os
@@ -44,8 +45,11 @@ def wait_port(port, timeout=30):
 
 
 def run_sample(lean, wind, wdir, speedup, retries=1):
-    """Fly one (lean, wind, dir) sample. Returns (result, steady_tilt, max_tilt) -- steady is the
-    attitude-hold metric (~wind-insensitive), max is the rail-exit transient (wind-driven). Retries
+    """Fly one (lean, wind, dir) sample. Returns (result, steady_tilt, powered_max) -- steady is the
+    attitude-hold metric (median true tilt, 20-60% of ascent), powered_max is the worst true tilt
+    while the fins still have authority (first 75% of ascent, apogee nose-over EXCLUDED). We do NOT
+    use the grader's full-ascent 'peak tilt': that is dominated by the apogee gravity-turn nose-over
+    (climb -> 0, q -> 0), which every rocket does and which is not a flight-quality number. Retries
     on a no-data run (harness missed apogee), since a real graded flight is what we want."""
     model = "rocket-tilt%g" % round(lean, 1)
     res = "NO-DATA"
@@ -68,7 +72,7 @@ def run_sample(lean, wind, wdir, speedup, retries=1):
             res = ("PASS" if "RESULT: PASS" in out
                    else "FAIL" if "RESULT: FAIL" in out else "?")
             ms = re.search(r"steady TRUE tilt.*?:\s*(-?[\d.]+)\s*deg", out)
-            mm = re.search(r"max tilt\s+est\s+[-\d.]+\s+true\s+(-?[\d.]+)", out)
+            mm = re.search(r"powered-flight max TRUE tilt.*?:\s*(-?[\d.]+)\s*deg", out)
             steady = float(ms.group(1)) if ms else None
             mx = float(mm.group(1)) if mm else None
             if steady is not None:          # got a real graded flight; done
@@ -102,15 +106,18 @@ def make_samples(a, rng):
 
 
 def plot(results, path):
-    # Two panels: STEADY tilt (attitude hold -- nearly wind-insensitive, the mission metric) and
-    # MAX tilt (the rail-exit transient -- THIS is what wind drives). Plotting max vs lean coloured
-    # by wind shows the real wind envelope; steady alone would falsely make wind look irrelevant.
+    # Two panels: STEADY tilt (attitude hold -- median true tilt over 20-60% of ascent, the mission
+    # metric) and POWERED-FLIGHT MAX tilt (worst true tilt over the first 75% of ascent, while the
+    # fins have authority -- the apogee gravity-turn nose-over is EXCLUDED). Plotting the powered max
+    # vs lean coloured by wind shows the real wind envelope during controllable flight; it is NOT a
+    # "rail-exit transient" and it does NOT include the unavoidable apogee nose-over.
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(15, 6))
     for ax, idx, ylab, title in ((a1, 4, "steady TRUE tilt (deg)", "attitude hold (mission metric)"),
-                                  (a2, 5, "MAX TRUE tilt (deg)", "rail-exit transient (wind-driven)")):
+                                  (a2, 5, "powered-flight max TRUE tilt (deg)",
+                                   "worst tilt in powered flight (apogee nose-over excluded)")):
         ok = [(t, w, r[idx]) for r in results for (t, w, d) in [r[:3]]
               if r[idx] is not None and r[3] == "PASS"]
         bad = [(t, w, r[idx]) for r in results for (t, w, d) in [r[:3]]
@@ -158,9 +165,10 @@ def main():
     samples = make_samples(a, rng)
     print(f"MONTE CARLO: {len(samples)} samples  (lean 0-{a.max_lean:g} deg, "
           f"wind 0-{a.max_wind:g} mph, dir 0-360)  speedup {a.speedup}\n")
-    # steady = attitude hold (mission metric, ~wind-insensitive); max = rail-exit transient, which
-    # is what wind actually drives -- report both so the wind dimension is not undersold.
-    print("   #   lean   wind   dir   result   steady   max_tilt")
+    # steady = attitude hold (mission metric, median true tilt 20-60% of ascent); pmax = worst true
+    # tilt in powered flight (first 75% of ascent, apogee nose-over excluded) -- the real wind-driven
+    # excursion while the fins have authority. Report both.
+    print("   #   lean   wind   dir   result   steady   pow_max")
 
     results = []
     for i, (t, w, d) in enumerate(samples):
@@ -187,12 +195,12 @@ def main():
 
     if graded:
         pctiles([r[4] for r in graded], "steady tilt (attitude hold)")
-        pctiles([r[5] for r in graded], "MAX tilt (transient, WIND-DRIVEN)")
-        # rank by the wind-sensitive metric: the biggest transient excursion
+        pctiles([r[5] for r in graded], "powered-flight max tilt (apogee nose-over excluded)")
+        # rank by the wind-sensitive metric: the biggest excursion during controllable (high-q) flight
         worst = sorted((r for r in graded if r[5] is not None), key=lambda r: -r[5])[:5]
-        print("worst 5 (highest MAX transient tilt):")
+        print("worst 5 (highest powered-flight max tilt):")
         for t, w, d, r, st, mx in worst:
-            print(f"   lean {t:4.1f}  wind {w:4.1f} @ {d:3.0f}   {r}   max {mx:4.1f}  steady {st:.1f}")
+            print(f"   lean {t:4.1f}  wind {w:4.1f} @ {d:3.0f}   {r}   pow_max {mx:4.1f}  steady {st:.1f}")
     if a.plot:
         plot(results, os.path.join(ROOT, "montecarlo.png"))
     fails = [r for r in graded if r[3] != "PASS"]

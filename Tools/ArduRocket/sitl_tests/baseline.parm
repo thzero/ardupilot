@@ -1,0 +1,25 @@
+# BASELINE: no control. All ascent-control gains zeroed, so the direct tilt/spin law commands the
+# fins to dead-center through BOOST/COAST -- the trim tabs never move. This flies the PASSIVE
+# airframe (fixed-fin static stability only), so you can see what the aerodynamics do on their own
+# with no controller in the loop. It is the reference for deciding whether a rail-exit excursion is
+# the AIRFRAME/SIM (present in the baseline too) or the CONTROLLER (only in a controlled flight).
+#
+# HOW TO REGENERATE (fresh SITL each flight):
+#   Tools/ArduRocket/sitl_tests/sitl.sh tilt20                       # or any rocket-tilt<N>
+#   python3 Tools/ArduRocket/sitl_tests/rocket_test.py gains --gains baseline.parm --wind 20
+#   # then read the newest logs/*.BIN for the TRUE tilt vs time (RKT.Tilt) at rail exit.
+# The grade FAILS (nothing corrects), which is expected -- read the trajectory, not PASS/FAIL.
+#
+# REFERENCE RESULT (20 deg rail, 20 mph crosswind):
+#   PASSIVE (this file):   20 deg on rail -> ~24 deg at rail exit -> settles ~29 deg while fast
+#                          -> gravity-turns to 40 deg (14 s) / 63 deg (20 s) as it slows to apogee.
+#   CONTROLLED (default):  same launch, but the fins drive it 20 -> ~2 deg by ~5 s and HOLD ~0.2-2
+#                          deg through the whole powered/coast ascent; it only noses over in the
+#                          last few seconds AT apogee (climb -> 0, q -> 0), which is unavoidable.
+#   So the controller does its job: it beats the passive airframe (~2 deg vs ~29 deg while fast) and
+#   flies vertical. The big "peak tilt" numbers you may see are the APOGEE nose-over, not rail exit,
+#   and not a fault -- grade the powered-flight window (first 75% of ascent), never the full ascent.
+RKT_TILT_P     0
+RKT_TILT_D     0
+RKT_TILT_I     0
+RKT_SPIN_DAMP  0

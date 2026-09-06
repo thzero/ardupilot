@@ -1,5 +1,8 @@
 # ArduRocket — Simulink / Aerospace Blockset plant
 
+> Tooling notes, not spec. The authoritative docs are `ArduRocket/ARDUROCKET_*.md` (README = operate,
+> PLAN = design record, STATUS = current state + what's next); this defers to them.
+
 The Simulink version of the plant. MATLAB owns the physics as a Simulink model;
 ArduPilot runs the **real flight code** and returns fin commands over UDP, exactly as in
 the script bridge (`../rocket_sim.m`) — this just swaps the hand-integrated `rocket_step.m`

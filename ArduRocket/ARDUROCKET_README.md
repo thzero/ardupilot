@@ -349,7 +349,10 @@ numbers above are placeholder guesses; replace them with your real measurements.
   proven state and the short remaining TODO list. (This README = how to use it; PLAN = why it's
   built this way; STATUS = what's done and what's next.)
 - **`Tools/ArduRocket/matlab/README.md`** — the MATLAB plant and JSON-bridge details.
-- A **thrust-vector-control (TVC)** variant is scoped but not implemented (PLAN Appendix A).
+- A **thrust-vector-control (TVC)** variant is **out of scope** (a design was scoped earlier and
+  removed to keep the record to what is actually built).
 
-**Open items:** `ATC_*` gain tuning (hold vertical as long as possible against the corrected
-plant), and setting the real control-tab dimensions.
+**Open items:** wiring the real `fin_arm` (CG-to-fin distance) so it need not be passed by hand, and
+a first **hardware flight** — everything so far is SITL. Both tracked in STATUS. (The ascent gains
+are derived from the airframe model, §9d; `ATC_*` are inert for ascent, so there is no ATC gain
+tuning to do.)

@@ -1,5 +1,8 @@
 # ArduRocket — MATLAB physics driving the real flight code
 
+> Tooling notes, not spec. The authoritative docs are `ArduRocket/ARDUROCKET_*.md` (README = operate,
+> PLAN = design record, STATUS = current state + what's next); this defers to them.
+
 MATLAB owns the rocket physics. ArduPilot runs **our actual flight code**,
 unmodified, and decides the fin deflections. The loop closes through the real
 controller, and you watch the reaction in MATLAB.
