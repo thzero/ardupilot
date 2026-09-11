@@ -66,7 +66,7 @@ bring-up lessons. It is **not** a forward plan — current state and pending wor
 > ### Ground station connection (WSL2)
 >
 > Connect the GCS over **TCP to `127.0.0.1:5760`**; WSL2 forwards Windows localhost
-> into WSL. Verified with ArduDeck, and with pymavlink.
+> into WSL. Verified with QGroundControl, ArduDeck, and pymavlink.
 >
 > Do **not** use `--serial0 udpclient:<windows-host>:14550`. Measured: SITL sends
 > heartbeats correctly to `udpclient:127.0.0.1`, but aimed at the WSL gateway IP it
@@ -1096,23 +1096,52 @@ SAME fin-geometry derivation.
 known answers (18 assertions, all also verified in Python). It found the inverted
 attitude bug on first run. Run it whenever the MATLAB maths changes.
 
-## 9c. Adding a new rocket — `Tools/ArduRocket/ork_to_rocket.py`
+## 9c. Adding a new rocket — `Tools/ArduRocket/ork_to_sim.py` + `sitl.sh`
 
-A rocket needs BOTH OpenRocket exports, because neither alone is sufficient:
-- the `.ork` has fin geometry and component masses but NOT inertia (OpenRocket computes
-  inertia at runtime and does not store it);
-- the CSV export has the computed inertia, mass and trajectory but NOT fin geometry.
+**There is no built-in reference rocket.** `SIM_RKT_DRYMASS`/`PRPMASS` default 0, and
+`SIM_Rocket::update()` refuses to fly an empty airframe (prints "NO ROCKET LOADED" and sits inert).
+Every flight is a real rocket you produce from its OpenRocket data:
 
 ```
-python3 Tools/ArduRocket/ork_to_rocket.py DESIGN.ork FLIGHT.csv --name NAME
+# 1. convert -> one complete self-contained rocket file (-> sitl_tests/NAME.parm)
+python3 Tools/ArduRocket/ork_to_sim.py NAME --tab-chord 0.025 --tab-span 0.030
+# 2. fly it
+Tools/ArduRocket/sitl_tests/sitl.sh NAME [tiltN]
 ```
 
-emits `NAME.parm` (SITL) and `NAME_params.m` (MATLAB), running the same fin-geometry
-derivation as the C++ so both sims agree. It deliberately does NOT guess what it cannot
-know — control-tab dimensions, fin arm and static margin are left at defaults and
-flagged **SET BY HAND** (re-run after editing so the derived force/stability update).
-This script exists because hand transcription is exactly where the errors above came
-from; it makes the extraction deterministic and repeatable.
+- **`ork_to_sim.py NAME`** — the positional is a shared **name/stem**: it uses `NAME.ork` +
+  `NAME-design.csv` (or `NAME.csv`) and names the output `NAME`. Override any of the three with
+  `--ork` / `--design` / `--name`. Only the control-tab dims (`--tab-chord`/`--tab-span`, not in
+  OpenRocket) are always required.
+- It reads the **design stats** (mass/CG/inertia/diameter/Cd/stability/nose-to-fin-root) from the
+  `.ork`'s **`<designinfo>` block** (SI) **and/or** a **labeled design CSV** (`Scope,Field,Value,Unit`,
+  via `--design`/`<base>-design.csv`) — **both are used and merged** (the `.ork` wins, the CSV fills
+  gaps); if a required stat is in **neither**, it **bails and lists exactly what's missing**. The
+  **fin planform** comes from the `.ork`'s `<trapezoidfinset>`; the **motor** is the `.ork`'s
+  **selected (`default="true"`) config**, its thrust curve **looked up on thrustcurve.org**
+  automatically — override with `--motor DESIGNATION`, or `--eng FILE` to work offline from a RASP
+  `.eng`. The control
+  line. It emits `NAME.parm` (into `sitl_tests/` by default) with the full `SIM_RKT_*` sim airframe,
+  the `RKT_*` flight-controller params (incl. `RKT_VMAX`), and the **motor thrust curve embedded** as
+  `# MOTOR:` lines — one self-contained file. It also **cross-checks** the design export's implied
+  motor mass (loaded − empty) against the chosen motor's total mass and warns on a >10% mismatch —
+  catching a design CSV that was exported with a *different* motor than the one being flown (so its
+  mass/CG/inertia would be inconsistent). (`design_to_qgc.py` is the QGC-params-only subset;
+  `ork_to_rocket.py` is the older flight-CSV path, kept but fragile — its column map is
+  export-specific.)
+- **One self-contained file per rocket+engine.** `NAME.parm` holds the airframe scalars, the
+  controller params, **and the motor thrust curve embedded as `# MOTOR: <t> <thrust>` lines**. There
+  is no separate `.eng` to carry at runtime (the input `.eng` is only fed to the converter once). A
+  "rocket" is airframe **+ a specific motor**, because loaded mass/CG/inertia depend on the motor and
+  one `.ork` can hold several sims — so each rocket+motor combo is its own file (name them e.g.
+  `test1_H128W`).
+- **`sitl.sh NAME [tiltN]`** resolves `NAME` → `sitl_tests/NAME.parm`, points `SIM_RKT_ENG` at that
+  same file (the sim reads the embedded `# MOTOR:` curve from it), and launches `--model rocket[-tiltN]`
+  with the estimator/tune (`rocket.parm`) + that rocket. No `--defaults` juggling, no separate motor file.
+- **No default anywhere:** the sim reads the curve from `SIM_RKT_ENG`; with no curve (`thrust_n < 2`)
+  it refuses ("NO MOTOR", sits inert), exactly like a missing airframe ("NO ROCKET LOADED"). So a
+  flight needs both an airframe (mass) and a motor (curve), both from real data.
+  `sitl_tests/test1.parm` is the worked example and the harness default.
 
 ## 9d. Physics-derived control gains
 
@@ -1273,8 +1302,96 @@ real CG-to-fin distance so `--fin-arm` is not required is the one remaining task
 - **Not needed / does not touch:** the `MOT_Q_REF` schedule geometry dependency (retired, see the
   note in §9); the estimator (DCM + no-GPS + gyro-only gate), the stage detector, the mixer
   saturation handling, and the integrator anti-windup are all separately validated.
-- **Remaining work** (wiring the real `fin_arm`, the first hardware flight, and deleting the
-  `MOT_Q_REF` schedule afterward) is tracked in STATUS, not here.
+- **Scope:** `ork_to_rocket.py`/§9d is a **sim/bench convenience** (it needs an OpenRocket model).
+  The **real-rocket** gain path — computed on the flight controller from hand-measured numbers, no
+  OpenRocket — is §9e below. Remaining program work (first hardware flight, deleting the `MOT_Q_REF`
+  schedule afterward) is tracked in STATUS, not here.
+
+## 9e. On-vehicle gain computation from field measurements (the real-rocket path)
+
+At the pad with a real rocket you have no OpenRocket model, so §9d can't run. This path computes the
+gains **on the flight controller** from numbers you measure on the physical airframe with a **scale,
+calipers, tape, and a balance point** — no simulator, no OpenRocket, and no swing test.
+
+**Measured inputs — QGC params, all obtainable with hand tools:**
+
+| Param | Units | How you measure it | Feeds |
+|---|---|---|---|
+| `RKT_MASS` | kg | scale (loaded, motor in) | inertia |
+| `RKT_LENGTH` | m | tape | J_tilt |
+| `RKT_BODY_D` | m | calipers | J_spin + fin force |
+| `RKT_FIN_ROOT` / `_TIP` / `_SPAN` | m | ruler | fin force |
+| `RKT_TAB_CHORD` / `_SPAN` | m | ruler | fin force |
+| `RKT_TAB_MAX` | deg | protractor / servo spec | fin force |
+| `RKT_NOSE_CG` | m | balance it, tape nose → balance point | fin_arm |
+| `RKT_NOSE_FIN` | m | tape nose → front of fin root | fin_arm |
+| `RKT_JTILT` (optional) | kg·m² | OpenRocket design export, if you have it | tilt inertia (else rod estimate) |
+| `RKT_JSPIN` (optional) | kg·m² | OpenRocket design export, if you have it | spin inertia (else cylinder estimate) |
+| `RKT_VMAX` (optional) | m/s | OpenRocket flight sim max velocity | flight-speed gain correction (below) |
+
+**When you enter what — not a pad ritual.** The fixed airframe constants (diameter, fin dims, tab,
+fin position, and inertia) are set **once** — ideally straight from the OpenRocket design export via
+`design_to_qgc.py` — and persist across flights. **Mass and CG are motor-dependent**, so they're
+measured and entered during **prep**, once the rocket is built up with its motor (`RKT_MASS`,
+`RKT_NOSE_CG`; CG shifts `fin_arm`). The **pad** is verify-and-arm: read back the logged computed
+gains and run the fin check — nothing is hand-typed at the pad. (`RKT_LENGTH` isn't needed at all
+when real `RKT_JTILT` is given, which the design export always provides.)
+
+**What the firmware computes at boot (once, and logs so you can read it back before you commit):**
+```
+J_tilt     = RKT_JTILT if >0 else MASS · LENGTH² / 12       # real inertia if known, else rod
+J_spin     = RKT_JSPIN if >0 else ½ · MASS · (BODY_D/2)²    #   "        "        else cylinder
+force_gain = derive_fin(fin planform + tab)                 # identical formula to sim/ork_to_rocket
+fin_arm    = NOSE_FIN − NOSE_CG                             # front-of-root convention
+RKT_TILT_P/D/I, RKT_SPIN_DAMP = C · J / (force_gain · fin_arm)   # clamped to param range
+```
+If `RKT_MASS ≤ 0` it does nothing and the direct `RKT_TILT_*` params are used as-is — backward
+compatible; the SITL default airframe still flies on the baked 2.5/0.5/2.0/0.006.
+
+**Real inertia beats the rod estimate — use it when you have it.** If you have an OpenRocket design
+export, `Tools/ArduRocket/design_to_qgc.py <design.csv> --ork <file.ork>` reads its labeled fields
+(mass, length, diameter, CG, `Nose to top of fin root`, and the real pitch/roll inertia) and prints
+the `RKT_*` values to paste into QGC — real `RKT_JTILT/JSPIN` included, so no rod approximation. The
+design CSV is labeled `Scope,Field,Value,Unit`, so there is **no column-index guessing** (unlike the
+header-less flight CSV `ork_to_rocket.py` parses — that map is export-specific and fragile).
+
+**Why the rod estimate is acceptable as a fallback:** a rocket is ~a slender rod, so `m·L²/12` (tilt)
+and `½·m·r²` (spin) get you close — and nobody swings a 6–30 lb rocket. Measured against a real
+airframe (`samples/test1`): rod `J_tilt` ran **+25%** (rod over-estimates; real mass is more central
+than a uniform rod) and cylinder `J_spin` **−12%**; on the reference airframe the rod `J_spin` was
+−34%. Those are real errors, but the gains are anchored, the integrator forgives moderate mismatch,
+and the first flight validates — so the rod fallback is a fine *starting* point when you have nothing
+but a tape and scale.
+
+**Flight-speed correction (`RKT_VMAX`) — needed for small/slow rockets.** In fixed-gain mode the
+closed-loop frequency is `ω_n² = q·C` — the airframe terms (J, force_gain, fin_arm) cancel, so ω_n
+depends only on dynamic pressure and the responsiveness constant. The `C` constants are anchored to
+the reference airframe, which flies to ~390 m/s (q ≈ 90 kPa). A small rocket that tops out much
+slower flies at far lower q and is therefore **chronically under-gained** — its loop is soft the
+whole flight. (This is precisely the low-q hole the retired q-schedule used to fill; fixed gain bets
+every rocket reaches high q.) Fix: if `RKT_VMAX` (the OpenRocket flight-sim max velocity) is set, the
+gains are scaled by `(390 / RKT_VMAX)²` (q ∝ v²) to hold ω_n at the airframe's operating q, clamped
+to 0.25–25×. 0 = no correction (assumes reference-like fast flight). **Verified:** test1 (samples/,
+AeroTech H128W, peaks ~100 m/s) without the correction *held its launch lean even at 3°* (physics
+gains P0.71 too soft); with `RKT_VMAX 101` the auto-gain applies ×14.9 → P 10.5/D 2.0/I 5.0 and it
+flies vertical at a realistic 3° rail (steady 0.5°). At a 20° rail it's authority-limited (full fin
+can't beat its 2.47-cal static margin), but 20° is an unrealistic lean for a small rocket.
+
+**Conventions locked so the reference round-trips:**
+- `fin_arm` is measured to the **front of the fin root** (leading edge meets body) — an unambiguous,
+  tape-friendly corner. The force actually acts a bit aft (the CP), so this reads slightly long, but
+  the `C` constants are calibrated with the **same** front-of-root convention, so the offset cancels
+  and only rocket-to-rocket scaling matters.
+- The `C` constants are anchored to the reference airframe's **real** inertia (J_tilt 4.962, J_spin
+  0.0208) with force_gain and fin_arm from its geometry, so with real inertia in it reproduces the
+  validated 2.5/0.5/2.0/0.006 exactly — and `C_P/C_D/C_I/C_S` are identical to `ork_to_rocket.py`.
+  (Verified in SITL: the reference numbers round-trip to 2.49/0.50/1.99/0.0060; 2× mass doubles the
+  gains; the rod fallback matches on tilt and drops spin to 0.0040, reflecting the −34% spin estimate.)
+
+**Honest limits:** the rod inertia fallback is approximate (see the measured errors above), the
+front-of-root/CP offset is a small systematic bias, and the `C` level is still anchored to a *sim*
+flight — so this produces a sound, physically-scaled **starting** tune, and the first hardware flight validates and
+trims it (fly conservative, give-up backstop armed).
 
 ## 10. Verification
 

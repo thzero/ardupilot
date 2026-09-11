@@ -163,6 +163,33 @@ public:
      */
     AP_Int8 qsched;
 
+    /*
+      Measured-airframe inputs for on-vehicle gain computation (PLAN §9e, the real-rocket path).
+      If af_mass > 0, compute_airframe_gains() runs these through the physics at boot and OVERRIDES
+      RKT_TILT_P/D/I and RKT_SPIN_DAMP with C*J/(force_gain*fin_arm); if af_mass <= 0 (the default)
+      the direct RKT_TILT_* gains are used as-is (backward compatible -- the SITL default airframe
+      flies on the baked 2.5/0.5/2.0/0.006). All hand-measurable: scale, calipers, tape, balance.
+     */
+    AP_Float af_mass;        // loaded mass, kg (scale)              -> inertia
+    AP_Float af_length;      // overall length, m (tape)            -> J_tilt = m*L^2/12
+    AP_Float af_body_d;      // body diameter, m (calipers)         -> J_spin + fin force
+    AP_Float af_fin_root;    // fin root chord, m (ruler)           -> fin force
+    AP_Float af_fin_tip;     // fin tip chord, m (ruler)            -> fin force
+    AP_Float af_fin_span;    // fin semispan, m (ruler)             -> fin force
+    AP_Float af_tab_chord;   // control-tab chord/depth, m (ruler)  -> fin force
+    AP_Float af_tab_span;    // control-tab spanwise length, m      -> fin force
+    AP_Float af_tab_max;     // control-tab max deflection, deg     -> fin force
+    AP_Float af_nose_cg;     // nose -> CG (balance point), m       -> fin_arm
+    AP_Float af_nose_fin;    // nose -> front of fin root, m        -> fin_arm
+    // Optional REAL inertia (kg.m^2), e.g. from an OpenRocket design export. If > 0 it is used
+    // directly (exact); if 0 the slender-rod estimate from mass/length/diameter is used instead.
+    AP_Float af_jtilt;       // tilt inertia (else rod m*L^2/12)
+    AP_Float af_jspin;       // spin inertia (else cylinder 0.5*m*r^2)
+    // Expected max airspeed (m/s), from the OpenRocket flight sim. Fixed-gain loop frequency is
+    // omega_n^2 = q*C, so a low-q (slow/small) rocket is under-gained; if set, the gains are scaled
+    // by (V_REF/af_vmax)^2 to hold omega_n at the airframe's operating q. 0 = no correction.
+    AP_Float af_vmax;
+
     // Flight stage detection: launch gating and burnout shutdown.
     AP_Rocket rocket;
 

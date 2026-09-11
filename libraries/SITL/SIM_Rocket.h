@@ -151,10 +151,15 @@ private:
     // and SIM_RKT_ROTDAMP. Rate damping is M = ROTDAMP * V * omega, proportional to
     // V not q; see the derivation in the .cpp.
 
-    // Thrust curve, from the export. Linear interpolation between breakpoints.
-    static constexpr uint8_t THRUST_PTS = 14;
-    static const float thrust_time[THRUST_PTS];
-    static const float thrust_newtons[THRUST_PTS];
+    // Thrust curve, loaded from a REAL RASP .eng file (thrustcurve.org format) named by the
+    // SIM_RKT_ENG environment variable. There is NO default/reference curve -- with no motor loaded
+    // thrust_n stays 0 and update() refuses to fly. Linear interpolation between breakpoints.
+    // (Mass still depletes against SIM_RKT_IMPULSE.)
+    static constexpr uint8_t THRUST_MAX = 128;        // max breakpoints a loaded .eng may have
+    float thrust_time[THRUST_MAX];
+    float thrust_newtons[THRUST_MAX];
+    uint8_t thrust_n = 0;                             // active breakpoints (0 = no motor loaded)
+    void load_thrust_curve();                         // from SIM_RKT_ENG; thrust_n=0 if unset
     float thrust_at(float t) const;
 
     // Mass depletes against total impulse (SIM_RKT_IMPULSE), not the integral of the

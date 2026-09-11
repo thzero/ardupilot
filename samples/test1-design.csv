@@ -1,0 +1,20 @@
+﻿Scope,Field,Value,Unit
+Design,Name,Rocket,
+Design,Design Type,Original Design/Other,
+Design,Stages,1,
+Rocket,Length,46.386,in
+Rocket,Max Diameter,2.6,in
+Rocket,Mass (Empty),46,oz
+Rocket,Mass (Loaded),53.1,oz
+Rocket,Fineness (L/D),17.84,
+Rocket,CG (Empty),29.634,in
+Rocket,CG (Loaded),31.366,in
+Rocket,CP,37.795,in
+Rocket,Stability (on pad),2.47,cal
+Rocket,Stability (%),14.1,%
+Rocket,Drag Coeff. (Ma 0.3),0.518,
+Rocket,Normal-Force Slope (CNα),11.93,/rad
+Rocket,Pitch Inertia (Loaded),7615,oz·in²
+Rocket,Roll Inertia (Loaded),50.7,oz·in²
+Rocket,CONTROL: Nose to top of fin root,41.551,in
+Rocket,CONTROL: Nose to bottom of fin root,45.094,in

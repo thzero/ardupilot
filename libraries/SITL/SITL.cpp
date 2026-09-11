@@ -1972,17 +1972,17 @@ const AP_Param::GroupInfo SIM::RocketParms::var_info[] = {
 
     // @Param: DRYMASS
     // @DisplayName: Burnt-out mass
-    // @Description: Airframe mass with the motor burnt out. From the OpenRocket CSV (mass column at end of burn).
+    // @Description: Airframe mass with the motor burnt out. DEFAULT 0 = NO ROCKET LOADED: there is no built-in reference airframe, so the sim sits inert until a real rocket is loaded. Generate one with Tools/ArduRocket/ork_to_sim.py and launch via Tools/ArduRocket/sitl_tests/sitl.sh <name> (which loads the whole SIM_RKT_* set). The other SIM_RKT_* defaults are inert placeholders, unused unless a rocket sets DRYMASS+PRPMASS > 0.
     // @Units: kg
     // @User: Advanced
-    AP_GROUPINFO("DRYMASS", 10, RocketParms, dry_mass, 8.47),
+    AP_GROUPINFO("DRYMASS", 10, RocketParms, dry_mass, 0.0),
 
     // @Param: PRPMASS
     // @DisplayName: Propellant mass
     // @Description: Propellant consumed over the burn. Liftoff mass = DRYMASS + PRPMASS.
     // @Units: kg
     // @User: Advanced
-    AP_GROUPINFO("PRPMASS", 11, RocketParms, prop_mass, 2.72),
+    AP_GROUPINFO("PRPMASS", 11, RocketParms, prop_mass, 0.0),
 
     // @Param: IMPULSE
     // @DisplayName: Total impulse

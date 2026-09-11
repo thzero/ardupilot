@@ -187,6 +187,122 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("RKT_QSCHED", 11, ParametersG2, qsched, 0),
 
+    // --- Measured-airframe inputs (PLAN §9e). Set these (via QGC) to compute the ascent gains on
+    // the flight controller from the physical rocket -- no OpenRocket, no sim. If RKT_MASS is 0
+    // (default) they are ignored and the direct RKT_TILT_*/SPIN_DAMP gains above are used as-is.
+
+    // @Param: RKT_MASS
+    // @DisplayName: Loaded mass
+    // @Description: Total loaded mass (motor installed), from a scale. Set >0 to enable on-vehicle gain computation from the measured airframe (PLAN §9e): the ascent gains are computed as C*J/(force_gain*fin_arm) at boot and override RKT_TILT_P/D/I and RKT_SPIN_DAMP. Set 0 to use the direct gains as-is.
+    // @Units: kg
+    // @Range: 0 50
+    // @User: Standard
+    AP_GROUPINFO("RKT_MASS", 12, ParametersG2, af_mass, 0.0f),
+
+    // @Param: RKT_LENGTH
+    // @DisplayName: Overall length
+    // @Description: Overall airframe length, from a tape. Used for the slender-rod tilt-inertia estimate J_tilt = mass*length^2/12. Only used when RKT_MASS>0.
+    // @Units: m
+    // @Range: 0 6
+    // @User: Standard
+    AP_GROUPINFO("RKT_LENGTH", 13, ParametersG2, af_length, 0.0f),
+
+    // @Param: RKT_BODY_D
+    // @DisplayName: Body diameter
+    // @Description: Body tube outside diameter, from calipers. Used for the spin-inertia estimate and the fin force model. Only used when RKT_MASS>0.
+    // @Units: m
+    // @Range: 0 0.5
+    // @User: Standard
+    AP_GROUPINFO("RKT_BODY_D", 14, ParametersG2, af_body_d, 0.0f),
+
+    // @Param: RKT_FIN_ROOT
+    // @DisplayName: Fin root chord
+    // @Description: Fin root chord (length where the fin meets the body), from a ruler. Only used when RKT_MASS>0.
+    // @Units: m
+    // @Range: 0 1
+    // @User: Standard
+    AP_GROUPINFO("RKT_FIN_ROOT", 15, ParametersG2, af_fin_root, 0.0f),
+
+    // @Param: RKT_FIN_TIP
+    // @DisplayName: Fin tip chord
+    // @Description: Fin tip chord, from a ruler. Only used when RKT_MASS>0.
+    // @Units: m
+    // @Range: 0 1
+    // @User: Standard
+    AP_GROUPINFO("RKT_FIN_TIP", 18, ParametersG2, af_fin_tip, 0.0f),
+
+    // @Param: RKT_FIN_SPAN
+    // @DisplayName: Fin semispan
+    // @Description: Fin semispan (root-to-tip height of one fin), from a ruler. Only used when RKT_MASS>0.
+    // @Units: m
+    // @Range: 0 1
+    // @User: Standard
+    AP_GROUPINFO("RKT_FIN_SPAN", 19, ParametersG2, af_fin_span, 0.0f),
+
+    // @Param: RKT_TAB_CHORD
+    // @DisplayName: Control-tab chord
+    // @Description: Control-tab chord/depth (how far forward the deflecting tab extends from the trailing edge), from a ruler. Only used when RKT_MASS>0.
+    // @Units: m
+    // @Range: 0 0.5
+    // @User: Standard
+    AP_GROUPINFO("RKT_TAB_CHORD", 20, ParametersG2, af_tab_chord, 0.0f),
+
+    // @Param: RKT_TAB_SPAN
+    // @DisplayName: Control-tab span
+    // @Description: Control-tab spanwise length, from a ruler. Only used when RKT_MASS>0.
+    // @Units: m
+    // @Range: 0 1
+    // @User: Standard
+    AP_GROUPINFO("RKT_TAB_SPAN", 21, ParametersG2, af_tab_span, 0.0f),
+
+    // @Param: RKT_TAB_MAX
+    // @DisplayName: Control-tab max deflection
+    // @Description: Maximum control-tab deflection angle (servo throw limit). Only used when RKT_MASS>0.
+    // @Units: deg
+    // @Range: 0 45
+    // @User: Standard
+    AP_GROUPINFO("RKT_TAB_MAX", 22, ParametersG2, af_tab_max, 20.0f),
+
+    // @Param: RKT_NOSE_CG
+    // @DisplayName: Nose to CG
+    // @Description: Distance from the nose tip to the CG (balance point), from a tape after balancing the loaded rocket. With RKT_NOSE_FIN gives the control moment arm fin_arm = NOSE_FIN - NOSE_CG. Only used when RKT_MASS>0.
+    // @Units: m
+    // @Range: 0 6
+    // @User: Standard
+    AP_GROUPINFO("RKT_NOSE_CG", 23, ParametersG2, af_nose_cg, 0.0f),
+
+    // @Param: RKT_NOSE_FIN
+    // @DisplayName: Nose to fin root
+    // @Description: Distance from the nose tip to the front of the fin root (where the fin leading edge meets the body), from a tape. With RKT_NOSE_CG gives fin_arm = NOSE_FIN - NOSE_CG. Only used when RKT_MASS>0.
+    // @Units: m
+    // @Range: 0 6
+    // @User: Standard
+    AP_GROUPINFO("RKT_NOSE_FIN", 24, ParametersG2, af_nose_fin, 0.0f),
+
+    // @Param: RKT_JTILT
+    // @DisplayName: Tilt inertia (measured/known)
+    // @Description: Loaded tilt (pitch/yaw) moment of inertia, if you know it -- e.g. from an OpenRocket design export. If >0 it is used directly. If 0, it is estimated from RKT_MASS and RKT_LENGTH as a slender rod (m*L^2/12), which typically runs ~25% high because real mass is not uniformly distributed. Only used when RKT_MASS>0.
+    // @Units: kg.m.m
+    // @Range: 0 100
+    // @User: Standard
+    AP_GROUPINFO("RKT_JTILT", 25, ParametersG2, af_jtilt, 0.0f),
+
+    // @Param: RKT_JSPIN
+    // @DisplayName: Spin inertia (measured/known)
+    // @Description: Loaded spin (roll) moment of inertia, if you know it -- e.g. from an OpenRocket design export. If >0 it is used directly. If 0, it is estimated from RKT_MASS and RKT_BODY_D as a solid cylinder (0.5*m*r^2). Only used when RKT_MASS>0.
+    // @Units: kg.m.m
+    // @Range: 0 10
+    // @User: Standard
+    AP_GROUPINFO("RKT_JSPIN", 26, ParametersG2, af_jspin, 0.0f),
+
+    // @Param: RKT_VMAX
+    // @DisplayName: Expected max airspeed
+    // @Description: Expected maximum airspeed, from the OpenRocket flight simulation. Fixed-gain control frequency scales with dynamic pressure (omega_n^2 = q*C), so a rocket that flies at low q (small/slow) is under-gained. If >0, the computed gains are scaled by (390/RKT_VMAX)^2 to hold the loop frequency at the airframe's operating dynamic pressure. 0 = no correction (assumes a fast, reference-like flight). Only used when RKT_MASS>0.
+    // @Units: m/s
+    // @Range: 0 700
+    // @User: Standard
+    AP_GROUPINFO("RKT_VMAX", 27, ParametersG2, af_vmax, 0.0f),
+
     // @Group: RKT_
     // @Path: ../libraries/AP_Rocket/AP_Rocket.cpp
     AP_SUBGROUPINFO(rocket, "RKT_", 1, ParametersG2, AP_Rocket),

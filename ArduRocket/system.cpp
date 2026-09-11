@@ -46,6 +46,10 @@ void ArduRocket::init_ardupilot()
     AP_Param::invalidate_count();
     apply_late_defaults();
 
+    // If the operator entered the measured airframe (RKT_MASS>0), compute the ascent gains from
+    // the physics now, overriding RKT_TILT_*/SPIN_DAMP. No-op otherwise (direct gains used). §9e.
+    compute_airframe_gains();
+
     // setup the 'main loop is dead' check
     hal.scheduler->register_timer_failsafe(failsafe_check_static, 1000);
 
@@ -95,6 +99,108 @@ void ArduRocket::init_ardupilot()
     stage = FlightStage::PREP;
 
     initialised = true;
+}
+
+/*
+  PLAN §9e -- the real-rocket gain path. If the operator has entered the measured airframe
+  (RKT_MASS > 0), compute the ascent gains from the physics and OVERRIDE RKT_TILT_P/D/I and
+  RKT_SPIN_DAMP. No OpenRocket, no sim: every input is measured with a scale, calipers, tape and a
+  balance point. If RKT_MASS <= 0 (default) this is a no-op and the direct RKT_TILT_* gains stand.
+
+    J_tilt   = m*L^2/12        (slender-rod estimate -- no swing test)
+    J_spin   = 0.5*m*(D/2)^2   (cylinder estimate)
+    force_gain = fin planform + tab   (same formula as SIM_Rocket / ork_to_rocket.py derive_fin)
+    fin_arm  = NOSE_FIN - NOSE_CG     (front-of-root convention)
+    gain     = C * J / (force_gain * fin_arm)
+
+  The C constants are calibrated so the reference airframe (run through THESE formulas) reproduces
+  its validated 2.5/0.5/2.0/0.006. C_P/C_D/C_I match ork_to_rocket.py (the reference length makes
+  m*L^2/12 = the reference J_tilt); C_S is re-anchored because the 0.5*m*r^2 spin estimate differs
+  from the model's spin inertia. See PLAN §9e for the full rationale and honest limits.
+ */
+void ArduRocket::compute_airframe_gains(void)
+{
+    const float mass = g2.af_mass;
+    if (!is_positive(mass)) {
+        return;   // disabled -- use the direct RKT_TILT_*/SPIN_DAMP gains as entered
+    }
+
+    const float L       = g2.af_length;
+    const float rb      = g2.af_body_d * 0.5f;
+    const float Cr      = g2.af_fin_root;
+    const float Ct      = g2.af_fin_tip;
+    const float sspan   = g2.af_fin_span;
+    const float fin_arm = g2.af_nose_fin - g2.af_nose_cg;
+
+    // Require a complete, sane set; a half-filled airframe must not silently produce junk gains.
+    // Length is only needed for the rod tilt-inertia estimate -- not if RKT_JTILT was given.
+    const bool need_L = !is_positive(g2.af_jtilt);
+    if (!is_positive(rb) || !is_positive(Cr) || !is_positive(sspan) || !is_positive(fin_arm) ||
+        (need_L && !is_positive(L))) {
+        gcs().send_text(MAV_SEVERITY_WARNING,
+                        "Rocket: RKT_MASS set but airframe incomplete; using direct gains");
+        return;
+    }
+
+    // Gain-derivation constants (PLAN §9e), anchored to the reference airframe's REAL inertia --
+    // same values as ork_to_rocket.py. Real inertia in => exact; the rod estimate carries its own
+    // (~10-25%) error, which is why RKT_JTILT/JSPIN are worth setting when you know them.
+    const float C_P = 1.882456e-03f;
+    const float C_D = 3.764911e-04f;
+    const float C_I = 1.505964e-03f;
+    const float C_S = 1.077778e-03f;
+
+    // Real inertia (RKT_JTILT/JSPIN) used directly if given; else a slender-body estimate.
+    const float J_tilt = is_positive(g2.af_jtilt) ? g2.af_jtilt : (mass * sq(L) / 12.0f);
+    const float J_spin = is_positive(g2.af_jspin) ? g2.af_jspin : (0.5f * mass * sq(rb));
+
+    // fin aerodynamic force per unit q at full deflection -- mirrors derive_fin() /
+    // SIM_Rocket::recompute_fin_geometry(); keep identical to those so the anchor stays valid.
+    const float S_fin = 0.5f * (Cr + Ct) * sspan;
+    const float AR    = 2.0f * sq(sspan) / S_fin;
+    const float CLa   = 2.0f * M_PI * AR / (2.0f + sqrtf(sq(AR) + 4.0f));
+    const float Kfb   = 1.0f + rb / (sspan + rb);
+    const float mean_chord     = 0.5f * (Cr + Ct);
+    const float tab_chord_frac = constrain_float(g2.af_tab_chord / mean_chord, 0.0f, 1.0f);
+    const float tab_span_frac  = constrain_float(g2.af_tab_span / sspan, 0.0f, 1.0f);
+    const float theta = acosf(constrain_float(2.0f * tab_chord_frac - 1.0f, -1.0f, 1.0f));
+    const float tau   = (1.0f - (theta - sinf(theta)) / M_PI) * 0.85f * tab_span_frac;
+    const float force_gain = S_fin * CLa * Kfb * tau * radians(g2.af_tab_max);
+
+    const float denom = force_gain * fin_arm;
+    if (!is_positive(denom)) {
+        gcs().send_text(MAV_SEVERITY_WARNING,
+                        "Rocket: airframe gain denom <= 0; using direct gains");
+        return;
+    }
+
+    // Flight-speed correction. Fixed-gain closed-loop frequency is omega_n^2 = q*C (the airframe
+    // terms cancel), so a rocket that flies at LOW dynamic pressure (small/slow) is chronically
+    // under-gained -- confirmed on test1 (peaks ~100 m/s vs the reference ~390, ~15x less q, needed
+    // ~10x hotter gains). To hold omega_n at the airframe's operating q, scale by (V_REF/vmax)^2
+    // (q ~ v^2). RKT_VMAX from the OpenRocket flight sim; 0 = no correction (reference-like flight).
+    const float V_REF = 390.0f;   // reference airframe max airspeed (m/s); C is anchored there
+    float speed_factor = 1.0f;
+    if (is_positive(g2.af_vmax)) {
+        speed_factor = constrain_float(sq(V_REF / g2.af_vmax), 0.25f, 25.0f);
+    }
+
+    // Compute and clamp to each param's declared range, then override in RAM (not saved).
+    const float tilt_p = constrain_float(speed_factor * C_P * J_tilt / denom, 0.0f, 20.0f);
+    const float tilt_d = constrain_float(speed_factor * C_D * J_tilt / denom, 0.0f, 2.0f);
+    const float tilt_i = constrain_float(speed_factor * C_I * J_tilt / denom, 0.0f, 5.0f);
+    const float sdamp  = constrain_float(speed_factor * C_S * J_spin / denom, 0.0f, 0.5f);
+    g2.tilt_p.set(tilt_p);
+    g2.tilt_d.set(tilt_d);
+    g2.tilt_i.set(tilt_i);
+    g2.spin_damp.set(sdamp);
+
+    // Log the result so it can be read on the pad BEFORE committing to a flight.
+    gcs().send_text(MAV_SEVERITY_INFO, "Rocket: airframe gains P%.2f D%.2f I%.2f S%.4f",
+                    (double)tilt_p, (double)tilt_d, (double)tilt_i, (double)sdamp);
+    gcs().send_text(MAV_SEVERITY_INFO, "Rocket: Jt%.2f Js%.4f fg%.5f arm%.3f spd_x%.1f",
+                    (double)J_tilt, (double)J_spin, (double)force_gain, (double)fin_arm,
+                    (double)speed_factor);
 }
 
 /*

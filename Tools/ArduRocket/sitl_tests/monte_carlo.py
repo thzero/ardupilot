@@ -28,7 +28,10 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, os.pardir, os.pardir, os.pardir))
 BIN = os.path.join(ROOT, "build", "sitl", "bin", "rocket")
-DEFAULTS = os.path.join(ROOT, "Tools", "autotest", "default_params", "rocket.parm")
+# Fly the test1 rocket (the harness default now the reference airframe is gone): rocket.parm for the
+# estimator/tune + test1.parm for the airframe (SIM_RKT_* + RKT_*), and its real motor via SIM_RKT_ENG.
+ROCKET = os.path.join(HERE, "test1.parm")   # self-contained: airframe + embedded motor curve
+DEFAULTS = os.path.join(ROOT, "Tools", "autotest", "default_params", "rocket.parm") + "," + ROCKET
 TEST = os.path.join(HERE, "rocket_test.py")
 PORT = 5760
 
@@ -57,6 +60,7 @@ def run_sample(lean, wind, wdir, speedup, retries=1):
         sitl = subprocess.Popen(
             [BIN, "--model", model, "--defaults", DEFAULTS, "-w", "--speedup", str(speedup)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT,
+            env={**os.environ, "SIM_RKT_ENG": ROCKET},   # motor curve embedded in the rocket file
             start_new_session=True)
         try:
             if not wait_port(PORT):

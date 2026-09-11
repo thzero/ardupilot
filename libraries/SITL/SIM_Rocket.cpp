@@ -38,14 +38,60 @@ using namespace SITL;
   thresholds actually have to discriminate. A square pulse would make burnout
   detection look far easier than it is.
  */
-const float Rocket::thrust_time[Rocket::THRUST_PTS] = {
-    0.00f, 0.05f, 0.10f, 0.20f, 0.50f, 1.00f, 1.50f,
-    2.00f, 2.50f, 3.00f, 3.50f, 4.00f, 4.40f, 4.70f
-};
-const float Rocket::thrust_newtons[Rocket::THRUST_PTS] = {
-    0.0f, 717.0f, 1433.0f, 1922.8f, 1720.0f, 1695.0f, 1672.0f,
-    1550.0f, 1330.0f, 1150.0f, 760.0f, 226.0f, 62.0f, 0.0f
-};
+/*
+  Load the motor thrust curve from the RASP .eng file named by SIM_RKT_ENG (thrustcurve.org format).
+  There is NO default/reference curve: with SIM_RKT_ENG unset or unreadable, thrust_n stays 0 and
+  update() refuses to fly (no phantom motor). RASP format: ';' comment lines, then one header line
+  (designation diameter length delays propMass totalMass manufacturer), then "time thrust" pairs. We
+  read only the time/thrust pairs -- mass still depletes against SIM_RKT_IMPULSE (baked from the .eng
+  by ork_to_sim.py).
+ */
+void Rocket::load_thrust_curve()
+{
+    thrust_n = 0;
+    const char *path = getenv("SIM_RKT_ENG");
+    if (path == nullptr || path[0] == '\0') {
+        return;   // no motor loaded -- update() refuses; there is no default curve
+    }
+    FILE *fp = fopen(path, "r");
+    if (fp == nullptr) {
+        ::printf("Rocket: could not open SIM_RKT_ENG=%s\n", path);
+        return;
+    }
+    char line[128];
+    bool header_seen = false;
+    while (fgets(line, sizeof(line), fp) != nullptr && thrust_n < THRUST_MAX) {
+        // Embedded form, inside a self-contained rocket .parm: "# MOTOR: <time> <thrust>".
+        const char *mk = strstr(line, "# MOTOR:");
+        if (mk != nullptr) {
+            float t, thr;
+            if (sscanf(mk + 8, "%f %f", &t, &thr) == 2) {
+                thrust_time[thrust_n] = t;
+                thrust_newtons[thrust_n] = thr;
+                thrust_n++;
+            }
+            continue;
+        }
+        // Raw RASP .eng: ';'/'#' comment lines, then one header line, then "time thrust" pairs.
+        char *s = line;
+        while (*s == ' ' || *s == '\t') { s++; }
+        if (*s == ';' || *s == '#' || *s == '\n' || *s == '\r' || *s == '\0') { continue; }
+        if (!header_seen) { header_seen = true; continue; }   // RASP header line
+        float t, thr;
+        if (sscanf(s, "%f %f", &t, &thr) == 2) {
+            thrust_time[thrust_n] = t;
+            thrust_newtons[thrust_n] = thr;
+            thrust_n++;
+        }
+    }
+    fclose(fp);
+    if (thrust_n >= 2) {
+        ::printf("Rocket: loaded %u-point thrust curve from %s\n", (unsigned)thrust_n, path);
+    } else {
+        ::printf("Rocket: SIM_RKT_ENG=%s had <2 points -- no motor\n", path);
+        thrust_n = 0;
+    }
+}
 
 /*
   Turn the SIM_RKT_* airframe dimensions into the three numbers the physics needs.
@@ -117,7 +163,7 @@ float Rocket::thrust_at(float t) const
     if (t <= thrust_time[0]) {
         return thrust_newtons[0];
     }
-    for (uint8_t i = 1; i < THRUST_PTS; i++) {
+    for (uint8_t i = 1; i < thrust_n; i++) {
         if (t <= thrust_time[i]) {
             const float span = thrust_time[i] - thrust_time[i-1];
             const float frac = is_positive(span) ? (t - thrust_time[i-1]) / span : 0.0f;
@@ -191,6 +237,7 @@ Rocket::Rocket(const char *frame_str) :
              (double)rail_tilt_deg, (double)rail_azimuth_deg, (double)rail_roll_deg);
 
     recompute_fin_geometry();
+    load_thrust_curve();   // SIM_RKT_ENG .eng (real thrustcurve.org data) if set, else default
 
     // "-unstable" flips the sign AFTER the geometry is computed, since
     // recompute_fin_geometry() derives instability_gain from the static margin.
@@ -207,6 +254,27 @@ void Rocket::update(const struct sitl_input &input)
 
     const float delta_time = frame_time_us * 1.0e-6f;
     const auto &rkt = AP::sitl()->rocket;
+
+    // No rocket, or no motor. There is NO built-in reference airframe (SIM_RKT_DRYMASS/PRPMASS
+    // default 0) and NO default thrust curve (thrust_n==0 unless SIM_RKT_ENG loaded one) -- rather
+    // than fly a fake, the sim sits inert and says which is missing. Load a real rocket + motor:
+    // generate it with Tools/ArduRocket/ork_to_sim.py and launch via sitl_tests/sitl.sh <name>.
+    const bool no_airframe = (rkt.dry_mass + rkt.prop_mass <= 0.0f);
+    if (no_airframe || thrust_n < 2) {
+        static uint32_t last_warn_ms;
+        const uint32_t now_ms = AP_HAL::millis();
+        if (now_ms - last_warn_ms > 3000) {
+            last_warn_ms = now_ms;
+            ::printf("Rocket: %s -- make a rocket with Tools/ArduRocket/ork_to_sim.py and launch "
+                     "via Tools/ArduRocket/sitl_tests/sitl.sh <name>. Sitting inert.\n",
+                     no_airframe ? "NO ROCKET LOADED (SIM_RKT_* airframe empty)"
+                                 : "NO MOTOR (SIM_RKT_ENG thrust curve not loaded)");
+        }
+        accel_body.zero();
+        gyro.zero();
+        update_dynamics(Vector3f());
+        return;
+    }
 
     /*
       Fin commands. The vehicle maps fins to the first four outputs at +/-4500,

@@ -266,6 +266,9 @@ private:
 
     // system.cpp
     void init_ardupilot() override;
+    // PLAN §9e: if the measured airframe is entered (RKT_MASS>0), compute the ascent gains
+    // (RKT_TILT_P/D/I, RKT_SPIN_DAMP) from the physics at boot, overriding the direct params.
+    void compute_airframe_gains(void);
     void allocate_motors(void);
     MAV_TYPE get_frame_mav_type();
     const char* get_frame_string();
