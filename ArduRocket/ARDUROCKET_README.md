@@ -342,6 +342,8 @@ numbers above are placeholder guesses; replace them with your real measurements.
 
 ## 9. Reference & status
 
+- **[`SETUP.md`](SETUP.md)** — development environment onboarding: WSL + Ubuntu, build
+  prerequisites, VS Code on WSL, and building. Start here on a fresh machine.
 - **[`ARDUROCKET_PLAN.md`](ARDUROCKET_PLAN.md)** — the design rationale and decision log:
   why each choice was made, the physics corrections, the bug history, verification results.
   This README links into its §-numbers for the "why."
